@@ -50,32 +50,28 @@ runs:
       run: |
         set -euo pipefail
         ERRORS=""
+        add_err() { ERRORS+="$1"$'\n'; }
         # 2a-(i) AGENTS.md
-        [ ! -f "AGENTS.md" ] && ERRORS+="2a-(i): AGENTS.md fehlt
-"
+        [ ! -f "AGENTS.md" ] && add_err "2a-(i): AGENTS.md fehlt"
         # 2a-(ii) gate-2-codex.yml
-        [ ! -f ".github/workflows/gate-2-codex.yml" ] && ERRORS+="2a-(ii): .github/workflows/gate-2-codex.yml fehlt
-"
+        [ ! -f ".github/workflows/gate-2-codex.yml" ] && add_err "2a-(ii): .github/workflows/gate-2-codex.yml fehlt"
         # 2a-(vi) Tier-Pflichtfelder
         case "$TIER" in
           1)
             for k in healthz_queue_threshold_s b2c_funnel visual_regression_paths critical_paths customer; do
               VAL=$(yq -r ".$k // \"\"" CLAUDE.md 2>/dev/null || echo "")
-              [ -z "$VAL" ] || [ "$VAL" = "null" ] && ERRORS+="2a-(vi): Tier-1 Pflichtfeld '$k' fehlt
-"
+              if [ -z "$VAL" ] || [ "$VAL" = "null" ]; then add_err "2a-(vi): Tier-1 Pflichtfeld '$k' fehlt"; fi
             done
             ;;
           2)
             for k in critical_paths customer; do
               VAL=$(yq -r ".$k // \"\"" CLAUDE.md 2>/dev/null || echo "")
-              [ -z "$VAL" ] || [ "$VAL" = "null" ] && ERRORS+="2a-(vi): Tier-2 Pflichtfeld '$k' fehlt
-"
+              if [ -z "$VAL" ] || [ "$VAL" = "null" ]; then add_err "2a-(vi): Tier-2 Pflichtfeld '$k' fehlt"; fi
             done
             ;;
           3|4)
             VAL=$(yq -r ".customer // \"\"" CLAUDE.md 2>/dev/null || echo "")
-            [ -z "$VAL" ] || [ "$VAL" = "null" ] && ERRORS+="2a-(vi): Tier-$TIER Pflichtfeld 'customer' fehlt
-"
+            if [ -z "$VAL" ] || [ "$VAL" = "null" ]; then add_err "2a-(vi): Tier-$TIER Pflichtfeld 'customer' fehlt"; fi
             ;;
         esac
         # 2a-(vii) critical_paths-Glob-Existenz
@@ -87,14 +83,13 @@ runs:
             matches=( $glob )
             shopt -u nullglob globstar 2>/dev/null
             if [ ${#matches[@]} -eq 0 ] && [ ! -e "$glob" ]; then
-              ERRORS+="2a-(vii): critical_paths-Glob '$glob' matcht keine Datei
-"
+              add_err "2a-(vii): critical_paths-Glob '$glob' matcht keine Datei"
             fi
           done <<< "$CP_LIST"
         fi
         if [ -n "$ERRORS" ]; then
-          echo "::error::Pre-PR-Quartett 2a BLOCK:
-$ERRORS"
+          echo "::error::Pre-PR-Quartett 2a BLOCK:"
+          printf '%s' "$ERRORS"
           exit 1
         fi
         echo "✓ 2a Repo-Konfig-Konformität"
@@ -104,13 +99,13 @@ $ERRORS"
       run: |
         set -euo pipefail
         ERRORS=""
+        add_err() { ERRORS+="$1"$'\n'; }
         # 2e-(ii) Auto-Push-Token-Audit (kein git push mit GITHUB_TOKEN)
         for wf in .github/workflows/*.yml; do
           [ ! -f "$wf" ] && continue
           if grep -qE 'git push|gh api .*-X (PUT|POST|PATCH|DELETE).*contents/' "$wf"; then
             if grep -qE 'secrets\.GITHUB_TOKEN' "$wf" && ! grep -qE 'create-github-app-token|APP_PRIVATE_KEY' "$wf"; then
-              ERRORS+="2e-(ii): $wf nutzt GITHUB_TOKEN für Auto-Push/Mutation
-"
+              add_err "2e-(ii): $wf nutzt GITHUB_TOKEN für Auto-Push/Mutation"
             fi
           fi
         done
@@ -121,8 +116,8 @@ $ERRORS"
           fi
         fi
         if [ -n "$ERRORS" ]; then
-          echo "::error::Pre-PR-Quartett 2e BLOCK:
-$ERRORS"
+          echo "::error::Pre-PR-Quartett 2e BLOCK:"
+          printf '%s' "$ERRORS"
           exit 1
         fi
         echo "✓ 2e Workflow-Konsistenz"
