@@ -1,0 +1,133 @@
+name: 'Pre-PR-Quartett (PB LLC §3.b.2)'
+description: 'Server-side Pre-PR-Quartett-Gate. Spiegelt den lokalen Plugin-Hook (pre-pr-config-health-budget.sh) serverseitig — schließt Out-of-band-PR-Lücke.'
+author: 'Paul Brandenburg LLC'
+
+inputs:
+  repo:
+    description: 'Repository name (owner/repo)'
+    required: true
+  tier:
+    description: 'Repo-Tier (1|2|3|4|auto). Bei "auto" wird aus CLAUDE.md gelesen.'
+    required: false
+    default: 'auto'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install dependencies (yq, jq)
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq jq
+        sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_amd64
+        sudo chmod +x /usr/local/bin/yq
+
+    - name: Read CLAUDE.md frontmatter
+      id: frontmatter
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ ! -f CLAUDE.md ]; then
+          echo "::warning::CLAUDE.md fehlt — Pre-PR-Quartett kann nicht voll laufen"
+          echo "tier=0" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        TIER=$(yq -r '.tier // 0' CLAUDE.md 2>/dev/null || echo 0)
+        STANDARD_VERSION=$(yq -r '.standard_version // ""' CLAUDE.md 2>/dev/null || echo "")
+        PLUGIN_VERSION=$(yq -r '.plugin_version // ""' CLAUDE.md 2>/dev/null || echo "")
+        PREPUSH_STACK=$(yq -r '.prepush_stack // "node"' CLAUDE.md 2>/dev/null || echo "node")
+        echo "tier=$TIER" >> "$GITHUB_OUTPUT"
+        echo "standard_version=$STANDARD_VERSION" >> "$GITHUB_OUTPUT"
+        echo "plugin_version=$PLUGIN_VERSION" >> "$GITHUB_OUTPUT"
+        echo "prepush_stack=$PREPUSH_STACK" >> "$GITHUB_OUTPUT"
+        echo "tier=$TIER, standard=$STANDARD_VERSION, plugin=$PLUGIN_VERSION, stack=$PREPUSH_STACK"
+
+    - name: 2a Repo-Konfig-Konformität
+      shell: bash
+      env:
+        TIER: ${{ steps.frontmatter.outputs.tier }}
+      run: |
+        set -euo pipefail
+        ERRORS=""
+        # 2a-(i) AGENTS.md
+        [ ! -f "AGENTS.md" ] && ERRORS+="2a-(i): AGENTS.md fehlt
+"
+        # 2a-(ii) gate-2-codex.yml
+        [ ! -f ".github/workflows/gate-2-codex.yml" ] && ERRORS+="2a-(ii): .github/workflows/gate-2-codex.yml fehlt
+"
+        # 2a-(vi) Tier-Pflichtfelder
+        case "$TIER" in
+          1)
+            for k in healthz_queue_threshold_s b2c_funnel visual_regression_paths critical_paths customer; do
+              VAL=$(yq -r ".$k // \"\"" CLAUDE.md 2>/dev/null || echo "")
+              [ -z "$VAL" ] || [ "$VAL" = "null" ] && ERRORS+="2a-(vi): Tier-1 Pflichtfeld '$k' fehlt
+"
+            done
+            ;;
+          2)
+            for k in critical_paths customer; do
+              VAL=$(yq -r ".$k // \"\"" CLAUDE.md 2>/dev/null || echo "")
+              [ -z "$VAL" ] || [ "$VAL" = "null" ] && ERRORS+="2a-(vi): Tier-2 Pflichtfeld '$k' fehlt
+"
+            done
+            ;;
+          3|4)
+            VAL=$(yq -r ".customer // \"\"" CLAUDE.md 2>/dev/null || echo "")
+            [ -z "$VAL" ] || [ "$VAL" = "null" ] && ERRORS+="2a-(vi): Tier-$TIER Pflichtfeld 'customer' fehlt
+"
+            ;;
+        esac
+        # 2a-(vii) critical_paths-Glob-Existenz
+        CP_LIST=$(yq -r '.critical_paths[]? // empty' CLAUDE.md 2>/dev/null || echo "")
+        if [ -n "$CP_LIST" ]; then
+          while IFS= read -r glob; do
+            [ -z "$glob" ] && continue
+            shopt -s nullglob globstar 2>/dev/null
+            matches=( $glob )
+            shopt -u nullglob globstar 2>/dev/null
+            if [ ${#matches[@]} -eq 0 ] && [ ! -e "$glob" ]; then
+              ERRORS+="2a-(vii): critical_paths-Glob '$glob' matcht keine Datei
+"
+            fi
+          done <<< "$CP_LIST"
+        fi
+        if [ -n "$ERRORS" ]; then
+          echo "::error::Pre-PR-Quartett 2a BLOCK:
+$ERRORS"
+          exit 1
+        fi
+        echo "✓ 2a Repo-Konfig-Konformität"
+
+    - name: 2e Workflow-Konsistenz
+      shell: bash
+      run: |
+        set -euo pipefail
+        ERRORS=""
+        # 2e-(ii) Auto-Push-Token-Audit (kein git push mit GITHUB_TOKEN)
+        for wf in .github/workflows/*.yml; do
+          [ ! -f "$wf" ] && continue
+          if grep -qE 'git push|gh api .*-X (PUT|POST|PATCH|DELETE).*contents/' "$wf"; then
+            if grep -qE 'secrets\.GITHUB_TOKEN' "$wf" && ! grep -qE 'create-github-app-token|APP_PRIVATE_KEY' "$wf"; then
+              ERRORS+="2e-(ii): $wf nutzt GITHUB_TOKEN für Auto-Push/Mutation
+"
+            fi
+          fi
+        done
+        # 2e-(iv) Bridge-Pattern in gate-2-codex.yml
+        if [ -f ".github/workflows/gate-2-codex.yml" ]; then
+          if ! grep -qE '💡 Codex Review|Codex Review' .github/workflows/gate-2-codex.yml; then
+            echo "::warning::2e-(iv): gate-2-codex.yml erkennt das Banner-Pattern '### 💡 Codex Review' nicht (Memory feedback_bridge_codex_pattern)"
+          fi
+        fi
+        if [ -n "$ERRORS" ]; then
+          echo "::error::Pre-PR-Quartett 2e BLOCK:
+$ERRORS"
+          exit 1
+        fi
+        echo "✓ 2e Workflow-Konsistenz"
+
+    - name: Summary
+      shell: bash
+      run: |
+        echo "::notice::Pre-PR-Quartett (Server-side, ${{ inputs.repo }}, Tier ${{ steps.frontmatter.outputs.tier }}) PASS"
