@@ -33,10 +33,25 @@ runs:
           echo "tier=0" >> "$GITHUB_OUTPUT"
           exit 0
         fi
-        TIER=$(yq -r '.tier // 0' CLAUDE.md 2>/dev/null || echo 0)
-        STANDARD_VERSION=$(yq -r '.standard_version // ""' CLAUDE.md 2>/dev/null || echo "")
-        PLUGIN_VERSION=$(yq -r '.plugin_version // ""' CLAUDE.md 2>/dev/null || echo "")
-        PREPUSH_STACK=$(yq -r '.prepush_stack // "node"' CLAUDE.md 2>/dev/null || echo "node")
+        # Extract YAML frontmatter (between first two --- markers); fallback to empty if absent.
+        FM=$(awk '/^---$/{n++; next} n==1{print} n==2{exit}' CLAUDE.md)
+        if [ -z "$FM" ]; then
+          echo "::notice::CLAUDE.md hat keine YAML-Frontmatter — Tier=0 (Skip)"
+          echo "tier=0" >> "$GITHUB_OUTPUT"
+          echo "standard_version=" >> "$GITHUB_OUTPUT"
+          echo "plugin_version=" >> "$GITHUB_OUTPUT"
+          echo "prepush_stack=node" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        TIER=$(printf '%s' "$FM" | yq -r '.tier // 0' 2>/dev/null || echo 0)
+        STANDARD_VERSION=$(printf '%s' "$FM" | yq -r '.standard_version // ""' 2>/dev/null || echo "")
+        PLUGIN_VERSION=$(printf '%s' "$FM" | yq -r '.plugin_version // ""' 2>/dev/null || echo "")
+        PREPUSH_STACK=$(printf '%s' "$FM" | yq -r '.prepush_stack // "node"' 2>/dev/null || echo "node")
+        # Sanitize: strip newlines / take first line only
+        TIER=$(printf '%s' "$TIER" | head -1 | tr -d '\r')
+        STANDARD_VERSION=$(printf '%s' "$STANDARD_VERSION" | head -1 | tr -d '\r')
+        PLUGIN_VERSION=$(printf '%s' "$PLUGIN_VERSION" | head -1 | tr -d '\r')
+        PREPUSH_STACK=$(printf '%s' "$PREPUSH_STACK" | head -1 | tr -d '\r')
         echo "tier=$TIER" >> "$GITHUB_OUTPUT"
         echo "standard_version=$STANDARD_VERSION" >> "$GITHUB_OUTPUT"
         echo "plugin_version=$PLUGIN_VERSION" >> "$GITHUB_OUTPUT"
@@ -49,6 +64,17 @@ runs:
         TIER: ${{ steps.frontmatter.outputs.tier }}
       run: |
         set -euo pipefail
+        # If Tier=0 (no frontmatter or skip), skip this step entirely
+        if [ "${TIER:-0}" = "0" ]; then
+          echo "::notice::2a übersprungen (Tier=0)"
+          exit 0
+        fi
+        # Extract YAML frontmatter from CLAUDE.md (between first two --- markers)
+        FM=$(awk '/^---$/{n++; next} n==1{print} n==2{exit}' CLAUDE.md)
+        if [ -z "$FM" ]; then
+          echo "::notice::2a übersprungen (keine Frontmatter)"
+          exit 0
+        fi
         ERRORS=""
         add_err() { ERRORS+="$1"$'\n'; }
         # 2a-(i) AGENTS.md
@@ -59,23 +85,23 @@ runs:
         case "$TIER" in
           1)
             for k in healthz_queue_threshold_s b2c_funnel visual_regression_paths critical_paths customer; do
-              VAL=$(yq -r ".$k // \"\"" CLAUDE.md 2>/dev/null || echo "")
+              VAL=$(printf '%s' "$FM" | yq -r ".$k // \"\"" 2>/dev/null || echo "")
               if [ -z "$VAL" ] || [ "$VAL" = "null" ]; then add_err "2a-(vi): Tier-1 Pflichtfeld '$k' fehlt"; fi
             done
             ;;
           2)
             for k in critical_paths customer; do
-              VAL=$(yq -r ".$k // \"\"" CLAUDE.md 2>/dev/null || echo "")
+              VAL=$(printf '%s' "$FM" | yq -r ".$k // \"\"" 2>/dev/null || echo "")
               if [ -z "$VAL" ] || [ "$VAL" = "null" ]; then add_err "2a-(vi): Tier-2 Pflichtfeld '$k' fehlt"; fi
             done
             ;;
           3|4)
-            VAL=$(yq -r ".customer // \"\"" CLAUDE.md 2>/dev/null || echo "")
+            VAL=$(printf '%s' "$FM" | yq -r ".customer // \"\"" 2>/dev/null || echo "")
             if [ -z "$VAL" ] || [ "$VAL" = "null" ]; then add_err "2a-(vi): Tier-$TIER Pflichtfeld 'customer' fehlt"; fi
             ;;
         esac
         # 2a-(vii) critical_paths-Glob-Existenz
-        CP_LIST=$(yq -r '.critical_paths[]? // empty' CLAUDE.md 2>/dev/null || echo "")
+        CP_LIST=$(printf '%s' "$FM" | yq -r '.critical_paths[]? // empty' 2>/dev/null || echo "")
         if [ -n "$CP_LIST" ]; then
           while IFS= read -r glob; do
             [ -z "$glob" ] && continue
