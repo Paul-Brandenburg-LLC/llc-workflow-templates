@@ -1,0 +1,127 @@
+name: Cold-Start CI (Reusable)
+
+# PB LLC §7.2 — Cold-Start-Probe gegen unerreichbare TEST-NET-IPs (RFC 5737).
+# Reusable-Workflow: Repos pinnen via:
+#   jobs:
+#     cold-start:
+#       uses: Paul-Brandenburg-LLC/llc-workflow-templates/.github/workflows/cold-start-ci.yml@v1
+#       with:
+#         stack: 'node'  # node|go|php
+#         port: 4000
+#
+# Erwartet: App degraded graceful (HTTP 200 mit status:degraded) ODER
+# exited mit klarer Fehlermeldung. Hard-Crash-Loop = Test failt.
+
+on:
+  workflow_call:
+    inputs:
+      stack:
+        description: 'node|go|php'
+        type: string
+        required: true
+      port:
+        description: 'App-Port'
+        type: number
+        default: 4000
+      health_path:
+        description: 'Health-Endpoint-Pfad'
+        type: string
+        default: '/healthz'
+      timeout_seconds:
+        description: 'Timeout für App-Start'
+        type: number
+        default: 30
+
+jobs:
+  cold-start:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      DATABASE_URL: postgres://x:x@192.0.2.1:5432/x
+      DB_HOST: 192.0.2.1
+      DB_PORT: 5432
+      DB_USERNAME: x
+      DB_PASSWORD: x
+      DB_DATABASE: x
+      REDIS_URL: redis://x:x@192.0.2.2:6379/0
+      COMMIT_SHA: ${{ github.sha }}
+      GIT_SHA: ${{ github.sha }}
+      PORT: ${{ inputs.port }}
+      NODE_ENV: development
+      SESSION_SECRET: cold-start-ci-secret
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.2.2
+
+      - name: Setup Node (if node-stack)
+        if: inputs.stack == 'node'
+        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b  # v4.0.3
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Setup Go (if go-stack)
+        if: inputs.stack == 'go'
+        uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b  # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup PHP (if php-stack)
+        if: inputs.stack == 'php'
+        uses: shivammathur/setup-php@cf4cade2721270509d5b1c766ab3549210a39a2a  # v2.30.4
+        with:
+          php-version: '8.2'
+
+      - name: Build (node)
+        if: inputs.stack == 'node'
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build || echo "::warning::no build script"
+
+      - name: Build (go) — robustes main-package-finden
+        if: inputs.stack == 'go'
+        run: |
+          set -euo pipefail
+          pkg=$(go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./... 2>/dev/null | grep -v '^$' | head -1)
+          if [ -z "$pkg" ]; then
+            main_dir=$(grep -rlE '^package main' --include='*.go' . 2>/dev/null | head -1 | xargs -I {} dirname {})
+            [ -n "$main_dir" ] && pkg="./$main_dir"
+          fi
+          if [ -z "$pkg" ]; then
+            echo "::error::No main package found"; exit 1
+          fi
+          echo "building: $pkg"
+          go build -o /tmp/app "$pkg"
+
+      - name: Cold-start with unreachable external deps
+        run: |
+          set +e
+          case "${{ inputs.stack }}" in
+            node)
+              (npm run start &) || (node dist/main &)
+              ;;
+            go)
+              (/tmp/app &)
+              ;;
+            php)
+              (php -S 0.0.0.0:${{ inputs.port }} . &)
+              ;;
+          esac
+          sleep ${{ inputs.timeout_seconds }}
+          STATUS=$(curl -fsS -o /tmp/health.json -w '%{http_code}' --max-time 5 "http://localhost:${{ inputs.port }}${{ inputs.health_path }}" || echo "000")
+          echo "HTTP $STATUS"
+          cat /tmp/health.json 2>/dev/null || true
+          case "$STATUS" in
+            200|503)
+              echo "::notice::Cold-start ok ($STATUS) — graceful degrade"
+              exit 0
+              ;;
+            000)
+              echo "::error::Hard-Crash-Loop — keine Antwort auf ${{ inputs.health_path }}"
+              exit 1
+              ;;
+            *)
+              echo "::error::unexpected status $STATUS"
+              exit 1
+              ;;
+          esac
