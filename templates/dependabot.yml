@@ -1,0 +1,107 @@
+# PB LLC Standard-Template für .github/dependabot.yml
+# Quelle: Paul-Brandenburg-LLC/llc-workflow-templates · templates/dependabot.yml
+# Spec: team-workflow.md §12 Wochenrhythmus + §3 (Plugin /llc-dependabot-sweep Mo 07:00 UTC)
+#
+# Anwendung pro Repo:
+#   1. Diese Datei nach .github/dependabot.yml kopieren
+#   2. Nicht-zutreffende Ecosystem-Blöcke löschen (z. B. composer für reine Node-Repos)
+#   3. Pfad-Anpassung nur wenn package.json/composer.json/go.mod nicht in /
+#
+# Konvention:
+#   - Alle Ecosystems: weekly Mo 06:00 UTC (60 min vor /llc-dependabot-sweep um 07:00 UTC)
+#   - open-pull-requests-limit: 5 pro Ecosystem (verhindert PR-Sturm)
+#   - automerge-Label nur für Patch-Bumps (Skill matcht Label, mergt bei grünem CI)
+#   - Major-Bumps tragen Label "major-bump-review" → blockiert Auto-Merge
+
+version: 2
+updates:
+
+  # --- npm / yarn (Repos mit package.json) ---
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "ecosystem:npm"
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
+      include: "scope"
+    groups:
+      patch-bumps:
+        update-types:
+          - "patch"
+        applies-to: version-updates
+    # Patch-Bumps werden über das Group-Label "patch-bumps" automatisch von
+    # /llc-dependabot-sweep als auto-merge-fähig erkannt. Minor/Major bleiben
+    # einzeln und gehen durch Mensch-Approval.
+
+  # --- GitHub Actions (.github/workflows/) ---
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "ecosystem:github-actions"
+    commit-message:
+      prefix: "chore(actions)"
+      include: "scope"
+    groups:
+      patch-bumps:
+        update-types:
+          - "patch"
+        applies-to: version-updates
+
+  # --- composer (PHP-Repos mit composer.json) ---
+  # Bei Repos ohne PHP: gesamten Block löschen.
+  - package-ecosystem: "composer"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "ecosystem:composer"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    groups:
+      patch-bumps:
+        update-types:
+          - "patch"
+        applies-to: version-updates
+
+  # --- go modules (Go-Repos mit go.mod) ---
+  # Bei Repos ohne Go: gesamten Block löschen.
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "ecosystem:gomod"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    groups:
+      patch-bumps:
+        update-types:
+          - "patch"
+        applies-to: version-updates
