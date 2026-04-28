@@ -1,0 +1,122 @@
+name: Gate 2 Codex (Reusable)
+
+# PB LLC §3.4 Gate 2 — Cross-Vendor-Reviewer-Bridge.
+# Reusable-Workflow: Repos pinnen via:
+#   jobs:
+#     bridge:
+#       uses: Paul-Brandenburg-LLC/llc-workflow-templates/.github/workflows/gate-2-codex.yml@v1
+#       secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      use_app_token:
+        description: 'GitHub App-Token für Auto-Push verwenden (Anti-Loop-Schutz)'
+        type: boolean
+        default: true
+        required: false
+
+permissions:
+  pull-requests: read
+  statuses: write
+  contents: write
+
+concurrency:
+  group: gate-2-codex-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  bridge:
+    if: >-
+      (github.event_name == 'pull_request') ||
+      (github.event_name == 'pull_request_review' && github.event.review.user.login == 'chatgpt-codex-connector[bot]') ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && github.event.comment.user.login == 'chatgpt-codex-connector[bot]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Resolve PR HEAD
+        id: head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          SHA=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Doc-only Skip (PB LLC §3.4 v5.8 M2)
+        id: scope
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          FILES=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json files --jq '.files[].path')
+          DOC_ONLY=1
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if [[ ! "$f" =~ \.(md|markdown)$ ]] && \
+               [[ ! "$f" =~ ^docs/ ]] && \
+               [[ ! "$f" =~ ^CHANGELOG ]] && \
+               [[ ! "$f" =~ ^\.github/ISSUE_TEMPLATE/ ]] && \
+               [[ ! "$f" =~ ^feedback_.*\.md$ ]]; then
+              DOC_ONLY=0; break
+            fi
+          done <<< "$FILES"
+          if [ "$DOC_ONLY" = "1" ]; then
+            DIFF=$(gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY")
+            if echo "$DIFF" | grep -qE '^[+-]version:'; then
+              DOC_ONLY=0
+            fi
+          fi
+          echo "skip=$([ "$DOC_ONLY" = "1" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Set status — Doc-only Skip
+        if: steps.scope.outputs.skip == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X POST "/repos/$GITHUB_REPOSITORY/statuses/${{ steps.head.outputs.sha }}" \
+            -f state=success -f context=gate-2-codex \
+            -f description="Doc-only skip"
+
+      - name: Read Codex Review/Comment
+        if: steps.scope.outputs.skip != 'true'
+        id: codex
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          REVIEW_BODY=$(gh api "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
+            --jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]")] | sort_by(.submitted_at) | last | .body // empty' 2>/dev/null || echo "")
+          REVIEW_STATE=$(gh api "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
+            --jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]")] | sort_by(.submitted_at) | last | .state // empty' 2>/dev/null || echo "")
+          COMMENT_BODY=$(gh api "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+            --jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]")] | sort_by(.created_at) | last | .body // empty' 2>/dev/null || echo "")
+          BODY="$REVIEW_BODY"
+          [ -z "$BODY" ] && BODY="$COMMENT_BODY"
+          STATE=pending
+          DESC="Awaiting Codex review"
+          if [ "$REVIEW_STATE" = "APPROVED" ]; then
+            STATE=success; DESC="Codex approved"
+          elif [ "$REVIEW_STATE" = "CHANGES_REQUESTED" ]; then
+            STATE=failure; DESC="Codex requests changes"
+          elif echo "$BODY" | grep -qE '### Integrations-Befunde|### Findings|🚨|\*\*P[01]\*\*'; then
+            STATE=failure; DESC="Codex findings"
+          elif echo "$BODY" | grep -qE '^### 💡 Codex Review|^### Codex Review'; then
+            STATE=success; DESC="Codex review: no findings"
+          fi
+          echo "state=$STATE" >> "$GITHUB_OUTPUT"
+          echo "desc=$DESC" >> "$GITHUB_OUTPUT"
+
+      - name: Post Status
+        if: steps.scope.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X POST "/repos/$GITHUB_REPOSITORY/statuses/${{ steps.head.outputs.sha }}" \
+            -f state="${{ steps.codex.outputs.state }}" \
+            -f context=gate-2-codex \
+            -f description="${{ steps.codex.outputs.desc }}"
