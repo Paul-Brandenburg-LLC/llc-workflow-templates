@@ -1,7 +1,7 @@
 ---
-standard_version: "5.11.0"
-standard_pinned_at: "2026-04-28"
-plugin_version: "1.10.1"
+standard_version: "5.11.1"
+standard_pinned_at: "2026-04-29"
+plugin_version: "1.11.0"
 prepush_stack: "static"
 tier: 4
 critical_paths: []
