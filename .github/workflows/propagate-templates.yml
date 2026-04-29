@@ -91,7 +91,7 @@ jobs:
           owner: Paul-Brandenburg-LLC
           repositories: ${{ matrix.repo }}
 
-      - name: Open auto-sync PR
+      - name: Open auto-sync PR via Contents API
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO: Paul-Brandenburg-LLC/${{ matrix.repo }}
@@ -102,25 +102,30 @@ jobs:
           BRANCH="chore/auto-sync-${TEMPLATE%.yml}-${TAG}"
           TARGET=".github/workflows/${TEMPLATE}"
 
-          # Clone Repo
-          tmpdir=$(mktemp -d)
-          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "$tmpdir"
-          cd "$tmpdir"
-
-          # Skip if file doesn't exist (Repo nicht migriert / nicht im Scope)
-          if [ ! -f "$TARGET" ]; then
+          # 1. Read current target file via API (skip wenn 404 oder bereits reusable).
+          CURRENT=$(gh api "/repos/${REPO}/contents/${TARGET}" 2>/dev/null || echo '{}')
+          SHA=$(echo "$CURRENT" | jq -r '.sha // empty')
+          if [ -z "$SHA" ]; then
             echo "::notice::$REPO has no $TARGET — skipping"
             exit 0
           fi
-
-          # Skip if already reusable (idempotent)
-          if grep -qE "^\s*uses:\s*Paul-Brandenburg-LLC/llc-workflow-templates" "$TARGET"; then
+          BODY_DECODED=$(echo "$CURRENT" | jq -r '.content // ""' | base64 -d 2>/dev/null || echo "")
+          if echo "$BODY_DECODED" | grep -qE "^\s*uses:\s*Paul-Brandenburg-LLC/llc-workflow-templates"; then
             echo "::notice::$REPO already on reusable — skipping"
             exit 0
           fi
 
-          # Generate reusable wrapper
-          cat > "$TARGET" <<EOF
+          # 2. Get default branch SHA (für branch creation).
+          MAIN_SHA=$(gh api "/repos/${REPO}/git/ref/heads/main" --jq '.object.sha')
+
+          # 3. Create branch via Refs API (idempotent: 422 wenn schon existiert).
+          gh api -X POST "/repos/${REPO}/git/refs" \
+            -f "ref=refs/heads/${BRANCH}" \
+            -f "sha=${MAIN_SHA}" \
+            > /dev/null 2>&1 || echo "::notice::branch ${BRANCH} already exists in $REPO"
+
+          # 4. Generate reusable wrapper content.
+          NEW_CONTENT=$(cat <<EOF
           name: Gate 2 Codex
 
           # PB LLC §3.4 v5.11.2 — Reusable-Workflow-Konsumierung verbindlich.
@@ -145,22 +150,22 @@ jobs:
               uses: Paul-Brandenburg-LLC/llc-workflow-templates/.github/workflows/${TEMPLATE}@${TAG}
               secrets: inherit
           EOF
+          )
+          NEW_B64=$(printf '%s\n' "$NEW_CONTENT" | base64 | tr -d '\n')
 
-          # Branch + Commit
-          git config user.email "auto-sync-templates@paulbrandenburg.com"
-          git config user.name "PB LLC Templates Sync"
-          git checkout -b "$BRANCH"
-          git add "$TARGET"
-          git commit -S -m "chore(workflows): auto-sync ${TEMPLATE} → reusable@${TAG}
+          # 5. Get current file SHA on the new branch (existed if branch was new = same as main).
+          BRANCH_FILE=$(gh api "/repos/${REPO}/contents/${TARGET}?ref=${BRANCH}" 2>/dev/null || echo '{}')
+          BRANCH_SHA=$(echo "$BRANCH_FILE" | jq -r '.sha // empty')
 
-          PB LLC §3.4 v5.11.2 Reusable-Workflow-Pflicht. Statische Kopie ersetzt
-          durch Reusable-Aufruf — single source of truth in
-          Paul-Brandenburg-LLC/llc-workflow-templates@${TAG}.
-
-          Auto-synced via propagate-templates.yml in templates-repo.
-          " || { echo "::notice::Nothing to commit for $REPO"; exit 0; }
-
-          git push origin "$BRANCH"
+          # 6. PUT contents API: erstellt App-signed Commit auf Branch.
+          MSG=$(printf 'chore(workflows): auto-sync %s → reusable@%s\n\nPB LLC §3.4 v5.11.2 Reusable-Workflow-Pflicht. Statische Kopie ersetzt\ndurch Reusable-Aufruf — single source of truth in\nPaul-Brandenburg-LLC/llc-workflow-templates@%s.\n\nAuto-synced via propagate-templates.yml in templates-repo.' "$TEMPLATE" "$TAG" "$TAG")
+          PUT_PAYLOAD=$(jq -nc \
+            --arg msg "$MSG" \
+            --arg ct "$NEW_B64" \
+            --arg br "$BRANCH" \
+            --arg sh "$BRANCH_SHA" \
+            '{message: $msg, content: $ct, branch: $br, sha: $sh}')
+          gh api -X PUT "/repos/${REPO}/contents/${TARGET}" --input - <<<"$PUT_PAYLOAD" > /dev/null
 
           # Open PR
           gh pr create \
