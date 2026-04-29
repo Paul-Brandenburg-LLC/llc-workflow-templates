@@ -1,0 +1,213 @@
+name: Propagate Templates
+
+# PB LLC §3.4 v5.11.2 — Auto-Sync der Reusable-Workflow-Templates.
+# Bei Push auf main mit Änderung in .github/workflows/*.yml ODER bei neuem Tag v1.x.y
+# öffnet dieser Workflow Auto-PRs in allen 22 Adoption-Repos, die ihre
+# statische Workflow-Datei (z.B. gate-2-codex.yml) durch einen Reusable-Aufruf
+# zu Paul-Brandenburg-LLC/llc-workflow-templates@v1.x.y ersetzen.
+#
+# Self-contained (kein repo-side Auto-Sync-Workflow nötig). Nutzt App-Token mit
+# contents:write + pull-requests:write Scope pro Repo.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/cold-start-ci.yml'
+      - '.github/workflows/gate-2-codex.yml'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Templates-Tag (override; sonst latest semver tag)'
+        required: false
+      template:
+        description: 'Welche Template-Datei propagieren (gate-2-codex.yml | cold-start-ci.yml | all)'
+        required: false
+        default: 'gate-2-codex.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.read.outputs.tag }}
+      template: ${{ steps.read.outputs.template }}
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with: { fetch-depth: 0 }
+      - name: Determine tag + template
+        id: read
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG=$(git tag -l 'v*' | sort -V | tail -1)
+          fi
+          TEMPLATE="${{ github.event.inputs.template }}"
+          [ -z "$TEMPLATE" ] && TEMPLATE="gate-2-codex.yml"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "template=$TEMPLATE" >> "$GITHUB_OUTPUT"
+          echo "Tag: $TAG, Template: $TEMPLATE"
+
+  propagate:
+    needs: detect
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        repo:
+          - ahud-app
+          - blockzocker-site
+          - backup-system
+          - bobstv-site
+          - devcluster-system
+          - devops-dashboard-app
+          - freiestimme-net-site
+          - geheimtreffen-site
+          - llc-claude-plugin
+          - llc-ops-backlog
+          - llc-paulbrandenburg-com-app
+          - mailer-app
+          - medienmaschine-app
+          - medienscanner-site
+          - nachrichtenmaschine-app
+          - nacktemark-de-site
+          - nn-acc-app
+          - nn-scriptwriter-app
+          - paulbrandenburg-com-site
+          - paulbrandenburg-shop-site
+          - remote-claude-system
+          - staatsterroristen-site
+          - standards
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: Paul-Brandenburg-LLC
+          repositories: ${{ matrix.repo }}
+
+      - name: Open auto-sync PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: Paul-Brandenburg-LLC/${{ matrix.repo }}
+          TEMPLATE: ${{ needs.detect.outputs.template }}
+          TAG: ${{ needs.detect.outputs.tag }}
+        run: |
+          set -euo pipefail
+          BRANCH="chore/auto-sync-${TEMPLATE%.yml}-${TAG}"
+          TARGET=".github/workflows/${TEMPLATE}"
+
+          # Clone Repo
+          tmpdir=$(mktemp -d)
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "$tmpdir"
+          cd "$tmpdir"
+
+          # Skip if file doesn't exist (Repo nicht migriert / nicht im Scope)
+          if [ ! -f "$TARGET" ]; then
+            echo "::notice::$REPO has no $TARGET — skipping"
+            exit 0
+          fi
+
+          # Skip if already reusable (idempotent)
+          if grep -qE "^\s*uses:\s*Paul-Brandenburg-LLC/llc-workflow-templates" "$TARGET"; then
+            echo "::notice::$REPO already on reusable — skipping"
+            exit 0
+          fi
+
+          # Generate reusable wrapper
+          cat > "$TARGET" <<EOF
+          name: Gate 2 Codex
+
+          # PB LLC §3.4 v5.11.2 — Reusable-Workflow-Konsumierung verbindlich.
+          # Auto-synced von Paul-Brandenburg-LLC/llc-workflow-templates@${TAG}.
+          # Kein lokaler Edit dieser Datei — Patches gehören ins templates-Repo.
+
+          on:
+            pull_request:
+              types: [opened, synchronize, reopened]
+            pull_request_review:
+              types: [submitted, edited]
+            issue_comment:
+              types: [created, edited]
+
+          permissions:
+            pull-requests: read
+            statuses: write
+            contents: read
+
+          jobs:
+            bridge:
+              uses: Paul-Brandenburg-LLC/llc-workflow-templates/.github/workflows/${TEMPLATE}@${TAG}
+              secrets: inherit
+          EOF
+
+          # Branch + Commit
+          git config user.email "auto-sync-templates@paulbrandenburg.com"
+          git config user.name "PB LLC Templates Sync"
+          git checkout -b "$BRANCH"
+          git add "$TARGET"
+          git commit -S -m "chore(workflows): auto-sync ${TEMPLATE} → reusable@${TAG}
+
+          PB LLC §3.4 v5.11.2 Reusable-Workflow-Pflicht. Statische Kopie ersetzt
+          durch Reusable-Aufruf — single source of truth in
+          Paul-Brandenburg-LLC/llc-workflow-templates@${TAG}.
+
+          Auto-synced via propagate-templates.yml in templates-repo.
+          " || { echo "::notice::Nothing to commit for $REPO"; exit 0; }
+
+          git push origin "$BRANCH"
+
+          # Open PR
+          gh pr create \
+            --repo "$REPO" \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore(workflows): auto-sync ${TEMPLATE} → reusable@${TAG}" \
+            --body "PB LLC §3.4 v5.11.2 — Migration statisch → reusable. Single source of truth: \`Paul-Brandenburg-LLC/llc-workflow-templates/${TEMPLATE}@${TAG}\`.
+
+          ## Blast-Radius
+
+          - [x] klein
+          - [ ] mittel
+          - [ ] groß
+
+          Single-File-Change, kein Code-Path.
+
+          ## Test-Plan
+
+          - [x] T1 yaml-syntax (auto-validated by templates@${TAG})
+          - [ ] T2a CI muss grün laufen
+          - [ ] T3 nach Merge: Bridge-Bug-Fix greift automatisch (Pattern liegt in templates)
+
+          🤖 Auto-PR via propagate-templates.yml" \
+            && echo "::notice::PR opened in $REPO" \
+            || echo "::warning::PR creation failed in $REPO"
+
+  summary:
+    needs: propagate
+    runs-on: ubuntu-latest
+    if: always()
+    permissions:
+      actions: read
+    steps:
+      - name: Aggregate matrix-job results
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          FAILED=$(gh api "/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
+            --paginate \
+            --jq '[.jobs[] | select(.name | startswith("propagate")) | select(.conclusion == "failure")] | length')
+          TOTAL=$(gh api "/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
+            --paginate \
+            --jq '[.jobs[] | select(.name | startswith("propagate"))] | length')
+          echo "Result: $FAILED/$TOTAL failed"
+          if [ "$FAILED" -gt 2 ]; then
+            echo "::error::More than 2 repos failed propagation ($FAILED/$TOTAL)"
+            exit 1
+          fi
