@@ -1,0 +1,29 @@
+name: Review
+on: pull_request
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+concurrency:
+  group: review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.2.2
+        with:
+          fetch-depth: 0
+      - uses: anthropics/claude-code-action@12310e4417c3473095c957cb311b3cf59a38d659  # v1.0.99
+        with:
+          allowed_bots: '*'
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          model: claude-opus-4-7
+          mode: review
+          prompt-skill: llc-review
+          context-files: |
+            CLAUDE.md
+            README.md
+          exclude-paths: |
+            specs/
+            templates/

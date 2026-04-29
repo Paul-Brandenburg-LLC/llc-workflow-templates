@@ -1,5 +1,5 @@
 ---
-standard_version: "5.11.1"
+standard_version: "5.11.2"
 standard_pinned_at: "2026-04-29"
 plugin_version: "1.11.0"
 prepush_stack: "static"
