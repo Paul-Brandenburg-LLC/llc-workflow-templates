@@ -19,7 +19,7 @@ on:
 permissions:
   pull-requests: read
   statuses: write
-  contents: write
+  contents: read
 
 concurrency:
   group: gate-2-codex-${{ github.event.pull_request.number || github.event.issue.number }}
