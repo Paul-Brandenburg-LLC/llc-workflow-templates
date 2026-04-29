@@ -105,7 +105,7 @@ jobs:
             STATE=failure; DESC="Codex requests changes"
           elif echo "$BODY" | grep -qE '### Integrations-Befunde|### Findings|🚨|\*\*P[01]\*\*'; then
             STATE=failure; DESC="Codex findings"
-          elif echo "$BODY" | grep -qE '^### 💡 Codex Review|^### Codex Review'; then
+          elif echo "$BODY" | grep -qE '^### 💡 Codex Review|^### Codex Review|^Codex Review: '; then
             STATE=success; DESC="Codex review: no findings"
           fi
           echo "state=$STATE" >> "$GITHUB_OUTPUT"
