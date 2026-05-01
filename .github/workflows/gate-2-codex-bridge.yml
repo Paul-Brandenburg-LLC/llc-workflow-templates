@@ -1,0 +1,23 @@
+name: Gate 2 Codex Bridge
+# Self-bridge: Templates-Repo callt seinen eigenen reusable workflow
+# damit der required-check 'gate-2-codex' für PRs auf diesem Repo gesetzt wird.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  pull_request_review:
+    types: [submitted, edited]
+  issue_comment:
+    types: [created, edited]
+
+permissions:
+  pull-requests: read
+  statuses: write
+  contents: write
+
+jobs:
+  bridge:
+    uses: ./.github/workflows/gate-2-codex.yml
+    with:
+      use_app_token: false
+    secrets: inherit

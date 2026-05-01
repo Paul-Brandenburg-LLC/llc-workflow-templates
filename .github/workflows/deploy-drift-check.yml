@@ -1,0 +1,75 @@
+name: Deploy Drift Check (Reusable)
+
+# PB LLC: Entwicklung §8.4.2 — Drift-Detection vor rsync --delete.
+# Reusable-Workflow für jedes Repo mit rsync-basiertem Deploy.
+# Blockiert Deploy wenn ungetrackte Live-Files gelöscht würden.
+#
+# Lehre 2026-04-16/2026-04-20 stattzeitung.net: nacktes rsync --delete
+# wischte Live-only-Hotfixes weg. Mit diesem Reusable: rsync --dry-run
+# --itemize-changes vorab, Drift-Zeilen außerhalb der Excludes-Allowlist
+# führen zu Workflow-Abort.
+#
+# Repos pinnen via:
+#   jobs:
+#     drift-check:
+#       uses: Paul-Brandenburg-LLC/llc-workflow-templates/.github/workflows/deploy-drift-check.yml@v1.2.0
+#       with:
+#         ssh_user: ${{ env.SSH_USER }}
+#         ssh_host: ${{ env.SSH_HOST }}
+#         ssh_path: ${{ env.SSH_PATH }}
+#         excludes_file: scripts/deploy-drift-check.sh
+#       secrets:
+#         ssh_pass: ${{ secrets.SSH_PASS }}
+
+on:
+  workflow_call:
+    inputs:
+      ssh_user:
+        description: 'SSH-User für rsync-Target'
+        type: string
+        required: true
+      ssh_host:
+        description: 'SSH-Host'
+        type: string
+        required: true
+      ssh_path:
+        description: 'Live-App-Pfad unter $HOME'
+        type: string
+        required: true
+      accept_drift:
+        description: 'Drift-Check übergehen (Workflow-Input vom Caller)'
+        type: boolean
+        default: false
+      excludes_file:
+        description: 'Pfad zum Drift-Check-Skript im Caller-Repo (mit Excludes-Liste). Default: scripts/deploy-drift-check.sh'
+        type: string
+        default: 'scripts/deploy-drift-check.sh'
+    secrets:
+      ssh_pass:
+        description: 'SSH-Password'
+        required: true
+
+jobs:
+  drift-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.2.2
+
+      - name: Install sshpass + rsync
+        run: sudo apt-get update -qq && sudo apt-get install -y sshpass rsync
+
+      - name: Run drift-check script
+        env:
+          SSHPASS: ${{ secrets.ssh_pass }}
+          SSH_USER: ${{ inputs.ssh_user }}
+          SSH_HOST: ${{ inputs.ssh_host }}
+          SSH_PATH: ${{ inputs.ssh_path }}
+          ACCEPT_DRIFT: ${{ inputs.accept_drift && 'true' || 'false' }}
+        run: |
+          if [ ! -x "${{ inputs.excludes_file }}" ]; then
+            echo "::error::Drift-Check-Skript ${{ inputs.excludes_file }} fehlt oder nicht ausführbar."
+            echo "::error::Repo muss das Skript inkl. Excludes-Liste mitbringen — siehe stattzeitung-net-site/scripts/deploy-drift-check.sh als Referenz."
+            exit 1
+          fi
+          ./${{ inputs.excludes_file }}
