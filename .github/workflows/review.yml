@@ -18,7 +18,7 @@ jobs:
         with:
           allowed_bots: '*'
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          model: claude-opus-4-7
+          model: claude-sonnet-4-6
           mode: review
           prompt-skill: llc-review
           context-files: |
