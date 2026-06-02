@@ -77,9 +77,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh api -X POST "/repos/$GITHUB_REPOSITORY/statuses/${{ steps.head.outputs.sha }}" \
-            -f state=success -f context=gate-2-codex \
-            -f description="Doc-only skip"
+          # Status unter BEIDEN Contexts posten: 'gate-2-codex' (Status-Name) und
+          # 'bridge' (= Job-Name; manche Repos haben den als Required-Context).
+          # Reusable-Job heisst 'bridge' → Check-Run 'bridge / bridge' matcht den
+          # Required-Context 'bridge' NICHT, daher Status explizit spiegeln.
+          for ctx in gate-2-codex bridge; do
+            gh api -X POST "/repos/$GITHUB_REPOSITORY/statuses/${{ steps.head.outputs.sha }}" \
+              -f state=success -f context="$ctx" \
+              -f description="Doc-only skip"
+          done
 
       - name: Read Codex Review/Comment
         if: steps.scope.outputs.skip != 'true'
@@ -116,7 +122,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh api -X POST "/repos/$GITHUB_REPOSITORY/statuses/${{ steps.head.outputs.sha }}" \
-            -f state="${{ steps.codex.outputs.state }}" \
-            -f context=gate-2-codex \
-            -f description="${{ steps.codex.outputs.desc }}"
+          for ctx in gate-2-codex bridge; do
+            gh api -X POST "/repos/$GITHUB_REPOSITORY/statuses/${{ steps.head.outputs.sha }}" \
+              -f state="${{ steps.codex.outputs.state }}" \
+              -f context="$ctx" \
+              -f description="${{ steps.codex.outputs.desc }}"
+          done
