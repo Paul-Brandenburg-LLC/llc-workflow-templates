@@ -21,6 +21,9 @@ Keiner — Templates werden via `uses:` aus anderen Repos konsumiert.
 ## Deploy
 Tag-basiert: `git tag v1.X.Y && git push --tags`. Repos pinnen auf `@v1` (Major) oder `@v1.X.Y` (exakt).
 
+## gate-2-codex: bridge-Status (seit v1.1.5, 2026-06-02)
+Der `gate-2-codex.yml`-Reusable-Job heißt `bridge` → GitHub erzeugt den Check-Run `bridge / bridge`, der den Required-Context `bridge` (in manchen Consumer-Repos) NICHT matcht. Seit **v1.1.5** postet der Workflow den Status daher unter BEIDEN Contexts (`gate-2-codex` + `bridge`), additiv. Behebt das Auto-Merge-Hängen von Daemon-Flush-PRs (PR #14).
+
 ## Critical Lessons
 - Workflow-Files müssen `actionlint`-clean sein (CI prüft das)
 - SHA-Pinning in `uses:` ist Pflicht ab Standard v5.11 (siehe `team-workflow.md` §N)
