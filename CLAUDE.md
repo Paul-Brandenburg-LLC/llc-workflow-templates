@@ -1,6 +1,6 @@
 ---
-standard_version: "5.17.0"
-standard_pinned_at: "2026-06-02"
+standard_version: "7.0.0"
+standard_pinned_at: "2026-07-03"
 plugin_version: "1.16.0"
 prepush_stack: "static"
 tier: 4
