@@ -8,6 +8,13 @@ name: Propagate Templates
 #
 # Self-contained (kein repo-side Auto-Sync-Workflow nötig). Nutzt App-Token mit
 # contents:write + pull-requests:write Scope pro Repo.
+#
+# Zwei Modi (Entscheidung: scripts/pin-bump-decide.sh):
+#   - migrate: statische Consumer-Datei -> Reusable-Aufruf@TAG (bisheriges Verhalten)
+#   - pinbump: bestehender exakter Reusable-Pin @vX.Y.Z < TAG (gleicher Major) -> @TAG
+#     (behebt: Exakt-Pinner bekamen Template-Fixes nie automatisch; nur @v1-Floater).
+#   Skip: bereits @TAG, Floating @v1, Commit-SHA-Pin, oder Major-Bump (= manuell).
+# dry_run-Input: nur erkennen + loggen, keine Branches/PRs.
 
 on:
   push:
@@ -24,6 +31,11 @@ on:
         description: 'Welche Template-Datei propagieren (gate-2-codex.yml | cold-start-ci.yml | all)'
         required: false
         default: 'gate-2-codex.yml'
+      dry_run:
+        description: 'Nur erkennen + loggen (migrate/pinbump/skip), keine Branches/PRs'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -83,6 +95,7 @@ jobs:
           - staatsterroristen-site
           - standards
     steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.2.2 — für scripts/pin-bump-decide.sh
       - uses: actions/create-github-app-token@v2
         id: app-token
         with:
@@ -91,18 +104,19 @@ jobs:
           owner: Paul-Brandenburg-LLC
           repositories: ${{ matrix.repo }}
 
-      - name: Open auto-sync PR via Contents API
+      - name: Open migrate / pin-bump PR via Contents API
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO: Paul-Brandenburg-LLC/${{ matrix.repo }}
           TEMPLATE: ${{ needs.detect.outputs.template }}
           TAG: ${{ needs.detect.outputs.tag }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
           set -euo pipefail
-          BRANCH="chore/auto-sync-${TEMPLATE%.yml}-${TAG}"
+          source "$GITHUB_WORKSPACE/scripts/pin-bump-decide.sh"
           TARGET=".github/workflows/${TEMPLATE}"
 
-          # 1. Read current target file via API (skip wenn 404 oder bereits reusable).
+          # 1. Read current target file via API.
           CURRENT=$(gh api "/repos/${REPO}/contents/${TARGET}" 2>/dev/null || echo '{}')
           SHA=$(echo "$CURRENT" | jq -r '.sha // empty')
           if [ -z "$SHA" ]; then
@@ -110,22 +124,25 @@ jobs:
             exit 0
           fi
           BODY_DECODED=$(echo "$CURRENT" | jq -r '.content // ""' | base64 -d 2>/dev/null || echo "")
-          if echo "$BODY_DECODED" | grep -qE "^\s*uses:\s*Paul-Brandenburg-LLC/llc-workflow-templates"; then
-            echo "::notice::$REPO already on reusable — skipping"
+
+          # 2. Extract currently pinned reusable ref (empty = static file / not yet reusable).
+          PINNED_REF=$(printf '%s\n' "$BODY_DECODED" \
+            | grep -oE "Paul-Brandenburg-LLC/llc-workflow-templates/[.]github/workflows/${TEMPLATE}@[A-Za-z0-9._-]+" \
+            | head -1 | sed 's/.*@//' || true)
+
+          # 3. Decision (SSOT: scripts/pin-bump-decide.sh) → migrate | pinbump | skip.
+          DECISION_MODE=""; DECISION_REASON=""
+          pin_bump_decide "$TEMPLATE" "$PINNED_REF" "$TAG"
+          echo "::notice::$REPO $TEMPLATE: mode=$DECISION_MODE (pinned=${PINNED_REF:-<static>} target=$TAG) -- $DECISION_REASON"
+
+          [ "$DECISION_MODE" = "skip" ] && exit 0
+          if [ "${DRY_RUN:-false}" = "true" ]; then
+            echo "DRY-RUN: wuerde '$DECISION_MODE' fuer $REPO/$TARGET ausfuehren (${PINNED_REF:-<static>} -> $TAG) -- kein Branch/PR"
             exit 0
           fi
 
-          # 2. Get default branch SHA (für branch creation).
-          MAIN_SHA=$(gh api "/repos/${REPO}/git/ref/heads/main" --jq '.object.sha')
-
-          # 3. Create branch via Refs API (idempotent: 422 wenn schon existiert).
-          gh api -X POST "/repos/${REPO}/git/refs" \
-            -f "ref=refs/heads/${BRANCH}" \
-            -f "sha=${MAIN_SHA}" \
-            > /dev/null 2>&1 || echo "::notice::branch ${BRANCH} already exists in $REPO"
-
-          # 4. Generate reusable wrapper content.
-          NEW_CONTENT=$(cat <<EOF
+          # 4a. Migrate-Wrapper (base-indent Heredoc, nur bei mode=migrate genutzt).
+          MIGRATE_WRAPPER=$(cat <<EOF
           name: Gate 2 Codex
 
           # PB LLC §3.4 v5.11.2 — Reusable-Workflow-Konsumierung verbindlich.
@@ -151,14 +168,34 @@ jobs:
               secrets: inherit
           EOF
           )
+
+          # 4b. Ziel-Inhalt + Branch + Texte je Modus.
+          if [ "$DECISION_MODE" = "pinbump" ]; then
+            BRANCH="chore/pin-bump-${TEMPLATE%.yml}-${TAG}"
+            NEW_CONTENT=$(printf '%s' "$BODY_DECODED" \
+              | sed -E "s#(Paul-Brandenburg-LLC/llc-workflow-templates/[.]github/workflows/${TEMPLATE})@${PINNED_REF}#\1@${TAG}#g")
+            PR_TITLE="chore(workflows): pin-bump ${TEMPLATE} ${PINNED_REF} -> ${TAG}"
+            PR_LEAD="Pin-Bump des bestehenden Reusable-Pins \`${PINNED_REF}\` -> \`${TAG}\` (gleicher Major, in-line). Kein Struktur-Change."
+            MSG=$(printf 'chore(workflows): pin-bump %s %s -> %s\n\nPB LLC §3.4 / v7.0.0 §16.2b — gate-freier Pin-Bump in-line.\nAuto-synced via propagate-templates.yml.' "$TEMPLATE" "$PINNED_REF" "$TAG")
+          else
+            BRANCH="chore/auto-sync-${TEMPLATE%.yml}-${TAG}"
+            NEW_CONTENT="$MIGRATE_WRAPPER"
+            PR_TITLE="chore(workflows): auto-sync ${TEMPLATE} -> reusable@${TAG}"
+            PR_LEAD="Migration statisch -> reusable. Single source of truth: \`Paul-Brandenburg-LLC/llc-workflow-templates/${TEMPLATE}@${TAG}\`."
+            MSG=$(printf 'chore(workflows): auto-sync %s -> reusable@%s\n\nPB LLC §3.4 v5.11.2 Reusable-Workflow-Pflicht.\nAuto-synced via propagate-templates.yml.' "$TEMPLATE" "$TAG")
+          fi
           NEW_B64=$(printf '%s\n' "$NEW_CONTENT" | base64 | tr -d '\n')
 
-          # 5. Get current file SHA on the new branch (existed if branch was new = same as main).
+          # 5. Create branch (idempotent).
+          MAIN_SHA=$(gh api "/repos/${REPO}/git/ref/heads/main" --jq '.object.sha')
+          gh api -X POST "/repos/${REPO}/git/refs" \
+            -f "ref=refs/heads/${BRANCH}" \
+            -f "sha=${MAIN_SHA}" \
+            > /dev/null 2>&1 || echo "::notice::branch ${BRANCH} already exists in $REPO"
+
+          # 6. File SHA on branch + PUT (App-signed commit).
           BRANCH_FILE=$(gh api "/repos/${REPO}/contents/${TARGET}?ref=${BRANCH}" 2>/dev/null || echo '{}')
           BRANCH_SHA=$(echo "$BRANCH_FILE" | jq -r '.sha // empty')
-
-          # 6. PUT contents API: erstellt App-signed Commit auf Branch.
-          MSG=$(printf 'chore(workflows): auto-sync %s → reusable@%s\n\nPB LLC §3.4 v5.11.2 Reusable-Workflow-Pflicht. Statische Kopie ersetzt\ndurch Reusable-Aufruf — single source of truth in\nPaul-Brandenburg-LLC/llc-workflow-templates@%s.\n\nAuto-synced via propagate-templates.yml in templates-repo.' "$TEMPLATE" "$TAG" "$TAG")
           PUT_PAYLOAD=$(jq -nc \
             --arg msg "$MSG" \
             --arg ct "$NEW_B64" \
@@ -167,13 +204,13 @@ jobs:
             '{message: $msg, content: $ct, branch: $br, sha: $sh}')
           gh api -X PUT "/repos/${REPO}/contents/${TARGET}" --input - <<<"$PUT_PAYLOAD" > /dev/null
 
-          # Open PR
+          # 7. Open PR.
           gh pr create \
             --repo "$REPO" \
             --base main \
             --head "$BRANCH" \
-            --title "chore(workflows): auto-sync ${TEMPLATE} → reusable@${TAG}" \
-            --body "PB LLC §3.4 v5.11.2 — Migration statisch → reusable. Single source of truth: \`Paul-Brandenburg-LLC/llc-workflow-templates/${TEMPLATE}@${TAG}\`.
+            --title "$PR_TITLE" \
+            --body "PB LLC §3.4 — ${PR_LEAD}
 
           ## Blast-Radius
 
@@ -186,8 +223,7 @@ jobs:
           ## Test-Plan
 
           - [x] T1 yaml-syntax (auto-validated by templates@${TAG})
-          - [ ] T2a CI muss grün laufen
-          - [ ] T3 nach Merge: Bridge-Bug-Fix greift automatisch (Pattern liegt in templates)
+          - [ ] T2a CI muss gruen laufen
 
           🤖 Auto-PR via propagate-templates.yml" \
             && echo "::notice::PR opened in $REPO" \
