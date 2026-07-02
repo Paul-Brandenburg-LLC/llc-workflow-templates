@@ -39,3 +39,15 @@ jobs:
             python3 -c "import yaml,sys; yaml.safe_load(open('$f'))" || { echo "::error::Invalid YAML in $f"; exit 1; }
             echo "ok: $f"
           done
+      - name: Run selftest-Harnesses (Verhaltens-Beweise)
+        run: |
+          shopt -s nullglob
+          any=0
+          for t in scripts/*-selftest.sh; do
+            [ -f "$t" ] || continue
+            any=1
+            echo "::group::$t"
+            bash "$t" || { echo "::error::selftest fehlgeschlagen: $t"; exit 1; }
+            echo "::endgroup::"
+          done
+          [ "$any" = 1 ] && echo "selftests ok" || echo "keine selftests vorhanden"
