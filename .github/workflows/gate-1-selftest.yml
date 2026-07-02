@@ -1,0 +1,83 @@
+name: Gate 1 Selftest
+
+# Live-E2E fuer gate-1-verdict.yml auf dem Templates-Repo selbst (PB LLC §3.4 / Anhang E.3).
+# Beweist auf echter Actions-Infrastruktur, dass ein HEAD-gebundener needs_changes-Marker
+# den Gate-1-Check ROT macht — ohne claude[bot] und ohne einen Consumer-Repo anzufassen.
+#
+# Ablauf:
+#   1) offline     — deterministische Parse-Szenarien (scripts/gate-1-verdict-selftest.sh)
+#   2) seed-marker — postet auf DIESEM PR einen needs_changes-Marker (github-actions[bot]),
+#                    gebunden an den aktuellen HEAD-SHA
+#   3) call-parser — ruft den ECHTEN Reusable gate-1-verdict.yml auf (review_bot-Override auf
+#                    github-actions[bot]); der liest den Marker → exit 1 → dieser Check wird ROT
+#   4) assert      — bestaetigt, dass call-parser wie erwartet fehlschlug (result == failure)
+#
+# call-parser ist KEIN Required-Check → der (erwartet) rote Lauf blockt den Merge nicht;
+# er ist das Live-Evidenz-Artefakt. assert (gruen) belegt: die Roetung war korrektes Verhalten.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/gate-1-verdict.yml'
+      - '.github/workflows/gate-1-selftest.yml'
+      - 'scripts/gate-1-verdict-selftest.sh'
+
+permissions:
+  pull-requests: write
+  statuses: write
+  contents: read
+
+concurrency:
+  group: gate-1-selftest-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.2.2
+      - name: Offline parse scenarios
+        run: bash scripts/gate-1-verdict-selftest.sh
+
+  seed-marker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Post HEAD-bound needs_changes marker as github-actions[bot]
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          gh api -X POST "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+            -f body="🧪 **gate-1 selftest** — synthetischer Review-Verdict (github-actions[bot]) fuer HEAD \`$HEAD_SHA\`.
+          Der Reusable gate-1-verdict.yml MUSS diesen Marker lesen und ROT werden.
+          <!-- llc-review-verdict:needs_changes sha=$HEAD_SHA -->"
+          echo "seeded needs_changes marker for HEAD=$HEAD_SHA"
+
+  call-parser:
+    needs: seed-marker
+    uses: ./.github/workflows/gate-1-verdict.yml
+    with:
+      review_bot: 'github-actions[bot]'
+    secrets: inherit
+
+  assert:
+    needs: call-parser
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Expect parser to have failed on needs_changes marker
+        run: |
+          set -euo pipefail
+          RESULT="${{ needs.call-parser.result }}"
+          echo "call-parser (gate-1-verdict) result = $RESULT"
+          if [ "$RESULT" = "failure" ]; then
+            echo "✅ E2E OK: HEAD-gebundener needs_changes-Marker → gate-1-verdict exit 1 (Check ROT)."
+          else
+            echo "::error::E2E FAIL: erwartet 'failure' (exit 1), bekam '$RESULT'."
+            exit 1
+          fi

@@ -1,0 +1,122 @@
+name: Gate 1 Verdict (Reusable)
+
+# PB LLC: Entwicklung §3.4 / Anhang E.3 (M13b) — Gate 1 (claude-review) Verdict → Exit.
+#
+# Problem (Audit-Befund 2026-07-02): Gate 1 (claude-review) war rein beratend — der
+# Reviewer schrieb "## Empfehlung: needs changes", aber NICHTS mappte das auf einen
+# roten Check. mm#128 wurde mit "Needs Changes" gemergt. Dieser Workflow schliesst das:
+# er liest einen maschinenlesbaren, HEAD-gebundenen Verdict-Marker aus dem Review-Kommentar
+# und setzt Status failure + exit 1 bei needs_changes.
+#
+# HEAD-Bindung (wie gate-2-codex.yml v7.0.0): ein "approve" zaehlt NUR, wenn der Marker
+# den aktuellen HEAD-SHA nennt. Verhindert Stale-Approval (approve@Commit-A wird nicht auf
+# ungeprueften Commit-B uebertragen).
+#
+# Marker-Format (vom Reviewer emittiert, HEAD-SHA von der review.yml via
+#   ${{ github.event.pull_request.head.sha }} in den Prompt getemplatet):
+#   <!-- llc-review-verdict:approve sha=<full-or-short-head-sha> -->
+#   <!-- llc-review-verdict:needs_changes sha=<full-or-short-head-sha> -->
+#
+# Consumer pinnen:
+#   jobs:
+#     verdict:
+#       uses: Paul-Brandenburg-LLC/llc-workflow-templates/.github/workflows/gate-1-verdict.yml@v1
+#       secrets: inherit
+#
+# Blockierend wird der Check erst, wenn der Owner den Kontext 'gate-1-verdict' zu den
+# Required-Checks der Branch-Protection hinzufuegt (BP-Toggle = Owner-Aktion, mir Hook-verboten).
+
+on:
+  workflow_call:
+    inputs:
+      review_bot:
+        description: 'Trusted comment author that emits the llc-review-verdict marker'
+        type: string
+        default: 'claude[bot]'
+        required: false
+
+permissions:
+  pull-requests: read
+  statuses: write
+  contents: read
+
+concurrency:
+  group: gate-1-verdict-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  verdict:
+    if: >-
+      (github.event_name == 'pull_request') ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Resolve PR HEAD
+        id: head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          SHA=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Read llc-review verdict marker (HEAD-bound)
+        id: verdict
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          HEAD_SHA: ${{ steps.head.outputs.sha }}
+          REVIEW_BOT: ${{ inputs.review_bot }}
+        run: |
+          set -euo pipefail
+          # Neueste Review-Bot-Kommentare, neueste zuerst, Bodies base64-kodiert
+          # (Newline-safe). Erster Kommentar mit HEAD-passendem Marker gewinnt.
+          mapfile -t B64 < <(gh api "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate \
+            --jq "[.[] | select(.user.login==\"$REVIEW_BOT\")] | sort_by(.created_at) | reverse | .[].body | @base64" 2>/dev/null || true)
+
+          VERDICT=""
+          for b in "${B64[@]:-}"; do
+            [ -z "$b" ] && continue
+            BODY=$(printf '%s' "$b" | base64 -d 2>/dev/null || true)
+            M=$(printf '%s\n' "$BODY" | grep -oE '<!-- llc-review-verdict:(approve|needs_changes) sha=[0-9a-fA-F]{7,40} -->' | tail -1 || true)
+            [ -z "$M" ] && continue
+            V=$(printf '%s' "$M" | sed -E 's/.*verdict:(approve|needs_changes) sha=.*/\1/')
+            S=$(printf '%s' "$M" | sed -E 's/.*sha=([0-9a-fA-F]{7,40}) -->/\1/' | tr 'A-F' 'a-f')
+            HEAD_LC=$(printf '%s' "$HEAD_SHA" | tr 'A-F' 'a-f')
+            # HEAD-Bindung: Marker-SHA muss Praefix (Short-SHA) oder gleich dem HEAD sein.
+            case "$HEAD_LC" in
+              "$S"*) VERDICT="$V"; break ;;
+            esac
+          done
+
+          if [ "$VERDICT" = "needs_changes" ]; then
+            STATE=failure; DESC="Gate 1: llc-review requests changes (HEAD)"
+          elif [ "$VERDICT" = "approve" ]; then
+            STATE=success; DESC="Gate 1: llc-review approved HEAD"
+          else
+            STATE=pending; DESC="Gate 1: awaiting llc-review verdict for current HEAD"
+          fi
+          {
+            echo "verdict=$VERDICT"
+            echo "state=$STATE"
+            echo "desc=$DESC"
+          } >> "$GITHUB_OUTPUT"
+          echo "Gate 1 verdict=${VERDICT:-<none>} state=$STATE (HEAD=$HEAD_SHA)"
+
+      - name: Post commit status (gate-1-verdict)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api -X POST "/repos/$GITHUB_REPOSITORY/statuses/${{ steps.head.outputs.sha }}" \
+            -f state="${{ steps.verdict.outputs.state }}" \
+            -f context="gate-1-verdict" \
+            -f description="${{ steps.verdict.outputs.desc }}"
+
+      - name: Fail job on needs_changes (exit 1)
+        if: steps.verdict.outputs.verdict == 'needs_changes'
+        run: |
+          echo "::error::Gate 1 (llc-review) verlangt Aenderungen fuer HEAD ${{ steps.head.outputs.sha }} — Merge blockiert."
+          exit 1
