@@ -1,0 +1,39 @@
+name: 'Deploy Green-Tag & Rollback'
+description: >-
+  Markiert erfolgreiche Deploys als unveraenderliches Tag green/<sha> (+ Zeiger green/latest)
+  und rollt bei failure() auf green/latest zurueck. Fixt den 422-Rollback-Bug (§8.6 / v7.0.0 E.5.2):
+  Rollback dispatcht einen TAG-Ref, keinen Commit-SHA. Ohne Fehler-Schlucker.
+
+inputs:
+  mode:
+    description: 'mark (NACH bestandenem §8.6-Effect-Check) | rollback (in einem if: failure()-Step)'
+    required: true
+  sha:
+    description: 'Commit-SHA fuer das green-Tag (nur mode=mark)'
+    required: false
+    default: ${{ github.sha }}
+  deploy_workflow:
+    description: 'Workflow-Datei, die beim Rollback re-dispatcht wird'
+    required: false
+    default: 'deploy.yml'
+  github_token:
+    description: 'Token mit contents:write (mark) + actions:write (rollback-Dispatch)'
+    required: true
+
+outputs:
+  green_ref:
+    description: 'Erstelltes Tag (mark) bzw. gewaehlter Rollback-Ref (rollback)'
+    value: ${{ steps.run.outputs.green_ref }}
+
+runs:
+  using: composite
+  steps:
+    - id: run
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        MODE: ${{ inputs.mode }}
+        SHA: ${{ inputs.sha }}
+        DEPLOY_WF: ${{ inputs.deploy_workflow }}
+        REPO: ${{ github.repository }}
+      run: bash "$GITHUB_ACTION_PATH/green-rollback.sh"
