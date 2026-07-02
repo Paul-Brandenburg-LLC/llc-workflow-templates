@@ -87,33 +87,59 @@ jobs:
               -f description="Doc-only skip"
           done
 
-      - name: Read Codex Review/Comment
+      - name: Read Codex Review/Comment (HEAD-bound, PB LLC §3.4 v7.0.0)
         if: steps.scope.outputs.skip != 'true'
         id: codex
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          HEAD_SHA: ${{ steps.head.outputs.sha }}
         run: |
           set -euo pipefail
-          REVIEW_BODY=$(gh api "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
-            --jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]")] | sort_by(.submitted_at) | last | .body // empty' 2>/dev/null || echo "")
-          REVIEW_STATE=$(gh api "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
-            --jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]")] | sort_by(.submitted_at) | last | .state // empty' 2>/dev/null || echo "")
+          # --- HEAD-Bindung (v7.0.0): ein Codex-Verdict zählt NUR, wenn es den aktuellen
+          # HEAD betraf. Ohne diese Prüfung wird ein "APPROVED" von Commit A auf einen
+          # neuen, ungeprüften Commit B übertragen (Stale-Approval-Loch, Audit-Befund). ---
+          SHORT_SHA="${HEAD_SHA:0:7}"
+
+          # Neuestes formales Codex-Review + der EXAKTE Commit, den es begutachtet hat.
+          LATEST_REVIEW=$(gh api "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
+            --jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]")] | sort_by(.submitted_at) | last // {}' 2>/dev/null || echo '{}')
+          REVIEW_STATE=$(echo "$LATEST_REVIEW" | jq -r '.state // empty')
+          REVIEW_SHA=$(echo "$LATEST_REVIEW"   | jq -r '.commit_id // empty')
+          REVIEW_BODY=$(echo "$LATEST_REVIEW"  | jq -r '.body // empty')
+
+          # Neuester Codex-Kommentar (Kommentare tragen keine commit_id → HEAD-SHA muss im Body stehen).
           COMMENT_BODY=$(gh api "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
             --jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]")] | sort_by(.created_at) | last | .body // empty' 2>/dev/null || echo "")
-          BODY="$REVIEW_BODY"
-          [ -z "$BODY" ] && BODY="$COMMENT_BODY"
+
           STATE=pending
-          DESC="Awaiting Codex review"
-          if [ "$REVIEW_STATE" = "APPROVED" ]; then
-            STATE=success; DESC="Codex approved"
-          elif [ "$REVIEW_STATE" = "CHANGES_REQUESTED" ]; then
-            STATE=failure; DESC="Codex requests changes"
-          elif echo "$BODY" | grep -qE '### Integrations-Befunde|### Findings|🚨|\*\*P[01]\*\*'; then
-            STATE=failure; DESC="Codex findings"
-          elif echo "$BODY" | grep -qE '^### 💡 Codex Review|^### Codex Review|^Codex Review: '; then
-            STATE=success; DESC="Codex review: no findings"
+          DESC="Awaiting Codex review for current HEAD"
+
+          eval_body() {  # $1=body → echoes success|failure|"" (kein erkennbares Verdict)
+            if echo "$1" | grep -qE '### Integrations-Befunde|### Findings|🚨|\*\*P[01]\*\*'; then echo failure
+            elif echo "$1" | grep -qE '^### 💡 Codex Review|^### Codex Review|^Codex Review: '; then echo success
+            else echo ""; fi
+          }
+
+          if [ -n "$REVIEW_SHA" ] && [ "$REVIEW_SHA" = "$HEAD_SHA" ]; then
+            # (1) Formales Review gegen den aktuellen HEAD — verbindlich.
+            if [ "$REVIEW_STATE" = "APPROVED" ]; then
+              STATE=success; DESC="Codex approved HEAD"
+            elif [ "$REVIEW_STATE" = "CHANGES_REQUESTED" ]; then
+              STATE=failure; DESC="Codex requests changes (HEAD)"
+            else
+              V=$(eval_body "$REVIEW_BODY")
+              [ "$V" = failure ] && { STATE=failure; DESC="Codex findings (HEAD)"; }
+              [ "$V" = success ] && { STATE=success; DESC="Codex review (HEAD): no findings"; }
+            fi
+          elif [ -n "$COMMENT_BODY" ] && echo "$COMMENT_BODY" | grep -qF -e "$HEAD_SHA" -e "$SHORT_SHA"; then
+            # (2) Kommentar-Fallback — nur wenn er den aktuellen HEAD-SHA explizit nennt.
+            V=$(eval_body "$COMMENT_BODY")
+            [ "$V" = failure ] && { STATE=failure; DESC="Codex findings (comment@HEAD)"; }
+            [ "$V" = success ] && { STATE=success; DESC="Codex comment (HEAD): no findings"; }
           fi
+          # Andernfalls bleibt STATE=pending → Codex re-reviewt den neuen HEAD via Integration;
+          # das folgende pull_request_review-Event lässt diese Bridge erneut laufen.
           echo "state=$STATE" >> "$GITHUB_OUTPUT"
           echo "desc=$DESC" >> "$GITHUB_OUTPUT"
 
