@@ -91,6 +91,29 @@ jobs:
             esac
           done
 
+          # Fallback (v1.4.0): kein Marker gefunden. review.yml kann den Marker wegen des
+          # claude-code-action Self-Mod-Guards (16.10) nicht emittieren. Daher parsen wir das
+          # "## Empfehlung"-Urteil direkt aus dem Review-Kommentar und binden es ueber den
+          # Run-SHA des Kommentars an den HEAD (robuster als Timestamp).
+          if [ -z "$VERDICT" ]; then
+            HEAD_LC=$(printf '%s' "$HEAD_SHA" | tr 'A-F' 'a-f')
+            for b in "${B64[@]:-}"; do
+              [ -z "$b" ] && continue
+              BODY=$(printf '%s' "$b" | base64 -d 2>/dev/null || true)
+              RUNID=$(printf '%s' "$BODY" | grep -oE 'actions/runs/[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
+              [ -z "$RUNID" ] && continue
+              RUN_SHA=$(gh run view "$RUNID" -R "$GITHUB_REPOSITORY" --json headSha --jq '.headSha' 2>/dev/null | tr 'A-F' 'a-f' || true)
+              [ "$RUN_SHA" != "$HEAD_LC" ] && continue
+              EMPF=$(printf '%s' "$BODY" | awk 'tolower($0) ~ /##[[:space:]]*empfehlung/{f=1} f{print}' | tr 'A-Z' 'a-z' | head -4 | tr '\n' ' ')
+              HAS_NC=$(printf '%s' "$EMPF" | grep -cE 'needs[ _-]changes|request changes|aenderung' || true)
+              HAS_AP=$(printf '%s' "$EMPF" | grep -cE 'approve|freigabe|safe-to-merge' || true)
+              # Mehrdeutig (z.B. unausgefuellter Platzhalter "[approve | needs changes]") -> kein Urteil.
+              if [ "${HAS_NC:-0}" -ge 1 ] && [ "${HAS_AP:-0}" -ge 1 ]; then continue
+              elif [ "${HAS_NC:-0}" -ge 1 ]; then VERDICT=needs_changes; break
+              elif [ "${HAS_AP:-0}" -ge 1 ]; then VERDICT=approve; break; fi
+            done
+          fi
+
           if [ "$VERDICT" = "needs_changes" ]; then
             STATE=failure; DESC="Gate 1: llc-review requests changes (HEAD)"
           elif [ "$VERDICT" = "approve" ]; then
