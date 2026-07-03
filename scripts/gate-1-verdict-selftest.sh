@@ -85,3 +85,24 @@ check "malformed-marker→pending" pending 0 "$V"
 
 echo "=== $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ] || exit 1
+
+# --- Empfehlung-Fallback-Parse (v1.4.0, spiegelt gate-1-verdict.yml Fallback-Step) ---
+empfehlung_verdict() { # stdin=comment body -> approve|needs_changes|""
+  local body empf; body="$(cat)"
+  empf=$(printf '%s' "$body" | awk 'tolower($0) ~ /##[[:space:]]*empfehlung/{f=1} f{print}' | tr 'A-Z' 'a-z' | head -4 | tr '\n' ' ')
+  local nc ap; nc=$(printf '%s' "$empf" | grep -cE 'needs[ _-]changes|request changes|aenderung' || true); ap=$(printf '%s' "$empf" | grep -cE 'approve|freigabe|safe-to-merge' || true)
+  if [ "${nc:-0}" -ge 1 ] && [ "${ap:-0}" -ge 1 ]; then echo ""
+  elif [ "${nc:-0}" -ge 1 ]; then echo needs_changes
+  elif [ "${ap:-0}" -ge 1 ]; then echo approve
+  else echo ""; fi
+}
+echo "=== Empfehlung-Fallback scenarios ==="
+PASS2=0; FAIL2=0
+chk2(){ [ "$2" = "$3" ] && { echo "  ok   [$1] -> $2"; PASS2=$((PASS2+1)); } || { echo "  FAIL [$1] got '$2' want '$3'"; FAIL2=$((FAIL2+1)); }; }
+V=$(printf '## Zusammenfassung\nkram\n## Risiken\nKeine.\n## Empfehlung: approve\nSafe-to-merge.\n' | empfehlung_verdict); chk2 "inline-approve" "$V" "approve"
+V=$(printf '## Empfehlung: needs changes\nDatei X Zeile Y.\n' | empfehlung_verdict); chk2 "inline-needs-changes" "$V" "needs_changes"
+V=$(printf '## Empfehlung\n[approve | needs changes] -> approve\n' | empfehlung_verdict); chk2 "template-platzhalter-ambiguous" "$V" ""
+V=$(printf '## Risiken\n- approve-Flow prüfen (kein Verdict!)\n## Empfehlung: needs changes\n' | empfehlung_verdict); chk2 "risks-approve-no-falsematch" "$V" "needs_changes"
+V=$(printf '## Zusammenfassung\nnur Prosa, keine Empfehlung.\n' | empfehlung_verdict); chk2 "keine-empfehlung" "$V" ""
+echo "=== Empfehlung: $PASS2 passed, $FAIL2 failed ==="
+[ "$FAIL2" -eq 0 ] || exit 1

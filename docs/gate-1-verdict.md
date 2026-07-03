@@ -77,3 +77,11 @@ Der Marker-Append in jede Consumer-`review.yml` ist eine Workflow-Änderung in (
 Repos → Owner-Approval-Hook. Sinnvoll gebündelt über die Adoptions-/Propagations-Welle.
 Bis der Marker in einer Consumer-`review.yml` steht, bleibt `gate-1-verdict` dort `pending`
 (blockt nicht fälschlich — fail-safe).
+
+## v1.4.0 — Empfehlung-Fallback (löst den Self-Mod-Guard-Blocker)
+
+**Problem:** Der Gate-1-Marker sollte aus der Consumer-`review.yml` kommen — aber ein PR, der `review.yml` ändert, lässt die claude-review-Action fehlschlagen (**Self-Mod-Guard §16.10**: „workflow file must have identical content to default branch"). Damit war der Marker-Ansatz **strukturell nicht ausrollbar** (bewiesen an mailer #99).
+
+**Fix:** `gate-1-verdict.yml` parst jetzt als **Fallback** das `## Empfehlung`-Urteil **direkt** aus dem `claude[bot]`-Kommentar und bindet es über den **Run-SHA** des Kommentars an den HEAD (robuster als Timestamp). **Kein review.yml-Edit mehr nötig.** Mehrdeutige Empfehlungen (unausgefüllter Platzhalter) → `pending` (fail-safe). Der explizite Marker bleibt als optionaler, präziserer Override erhalten.
+
+**Konsequenz für den Rollout:** Gate 1 wird armierbar durch **nur** (a) `gate-1-verdict.yml@v1` als Job in der Consumer-`ci.yml` (kein self-modding Workflow) + (b) `gate-1-verdict` als Required-Check (Owner-BP). Keine 20 self-mod-geblockten review.yml-PRs.
