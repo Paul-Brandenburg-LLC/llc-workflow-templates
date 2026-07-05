@@ -1,0 +1,106 @@
+name: Auto Pin-Bump (Reusable)
+
+# PB LLC §3.4 v7.0.3 — Pin-Wellen-Workflow als Reusable.
+# Ersetzt die statischen auto-pin-bump.yml-Kopien pro Repo, deren \n-Body-Bug
+# zwei Wellen (04.07. + 05.07.2026, llc-ops-backlog#410) am pr-template-gate
+# hängen ließ, weil "Root-Fixes" die Datei-Kopien nie erreichten.
+#
+# Repos konsumieren via:
+#   on:
+#     repository_dispatch:
+#       types: [plugin-bump]
+#   jobs:
+#     bump:
+#       uses: Paul-Brandenburg-LLC/llc-workflow-templates/.github/workflows/auto-pin-bump.yml@v1.5.0
+#       with:
+#         version: ${{ github.event.client_payload.version }}
+#       secrets: inherit
+#
+# Pflicht-Anforderungen (v7.0.3):
+#   (1) PR-Body pr-template-gate-konform mit ECHTEN Zeilenumbrüchen
+#   (2) Auto-Merge direkt nach PR-Create armen (tolerant bei Repo-Setting)
+#   (3) fester Branch chore/plugin-pin-bump — Folge-Release aktualisiert
+#       denselben PR statt Kollisions-PRs auf derselben Frontmatter-Zeile
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Neue Plugin-Version (aus client_payload)'
+        type: string
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Bump plugin_version via API (App-signed), PR öffnen, Auto-Merge armen
+        env:
+          NEW_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "$NEW_VERSION" ]; then
+            echo "::error::no version input"
+            exit 1
+          fi
+          OWNER="${REPO%%/*}"
+
+          # Aktuelle CLAUDE.md holen und Pin ersetzen
+          FILE_JSON=$(gh api "/repos/$REPO/contents/CLAUDE.md")
+          FILE_SHA=$(echo "$FILE_JSON" | jq -r '.sha')
+          CONTENT=$(echo "$FILE_JSON" | jq -r '.content' | base64 -d)
+          NEW_CONTENT=$(printf '%s' "$CONTENT" | awk -v v="$NEW_VERSION" '/^plugin_version: "[^"]*"$/ { sub(/"[^"]*"/, "\"" v "\"") } { print }')
+          if [ "$CONTENT" = "$NEW_CONTENT" ]; then
+            echo "::notice::Plugin-Pin already at $NEW_VERSION"
+            exit 0
+          fi
+
+          # Fester Branch (v7.0.3): force-Reset auf main — ein evtl. offener
+          # Pin-PR eines vorherigen Releases wird aktualisiert statt gestapelt
+          BRANCH="chore/plugin-pin-bump"
+          BASE_SHA=$(gh api "/repos/$REPO/git/refs/heads/main" --jq '.object.sha')
+          gh api -X POST "/repos/$REPO/git/refs" \
+            -f ref="refs/heads/$BRANCH" -f sha="$BASE_SHA" 2>/dev/null || \
+          gh api -X PATCH "/repos/$REPO/git/refs/heads/$BRANCH" \
+            -f sha="$BASE_SHA" -F force=true
+
+          # PUT (auto-signed als GitHub App); FILE_SHA gilt, weil der Branch
+          # soeben auf main zurückgesetzt wurde
+          NEW_B64=$(echo "$NEW_CONTENT" | base64 | tr -d '\n')
+          gh api -X PUT "/repos/$REPO/contents/CLAUDE.md" \
+            -f message="chore(plugin): bump pin to v$NEW_VERSION (auto via propagate-plugin-bump §3.4 v7.0.3)" \
+            -f content="$NEW_B64" -f sha="$FILE_SHA" -f branch="$BRANCH"
+
+          # Body mit ECHTEN Newlines — gh api -f interpretiert keine \n-Escapes
+          BODY=$(printf '## Summary\nAuto-PR aus llc-claude-plugin Plugin-Tag-Push. Reine Frontmatter-Änderung (App-signed via API-PUT).\n\n## Blast-Radius\n- [x] klein')
+
+          # PR öffnen oder bestehenden aktualisieren (fester Branch)
+          PR_NUMBER=$(gh api "/repos/$REPO/pulls?head=$OWNER:$BRANCH&state=open" --jq '.[0].number // empty')
+          if [ -z "$PR_NUMBER" ]; then
+            PR_NUMBER=$(gh api -X POST "/repos/$REPO/pulls" \
+              -f title="chore(plugin): bump pin to v$NEW_VERSION" \
+              -f head="$BRANCH" -f base="main" \
+              -f body="$BODY" --jq '.number')
+          else
+            gh api -X PATCH "/repos/$REPO/pulls/$PR_NUMBER" \
+              -f title="chore(plugin): bump pin to v$NEW_VERSION" \
+              -f body="$BODY" >/dev/null
+          fi
+
+          # Auto-Merge armen — tolerant: Repo ohne Allow-auto-merge oder
+          # BP-Sonderfälle (standards: Code-Owner-Review durch Release-Session)
+          gh pr merge "$PR_NUMBER" --repo "$REPO" --auto --merge \
+            || echo "::warning::Auto-Merge nicht armierbar — PR #$PR_NUMBER braucht manuellen Merge/Approve (§3.4 v7.0.3 Sonderfälle)"
