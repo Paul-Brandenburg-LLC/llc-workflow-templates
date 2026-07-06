@@ -53,7 +53,7 @@ jobs:
           SHA=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Doc-only Skip (PB LLC §3.4 v5.8 M2)
+      - name: Scope Skip — Doc-only / Pin-Bump (PB LLC §3.4 v5.8 M2 + v7.0.5)
         id: scope
         if: github.event_name == 'pull_request'
         env:
@@ -62,6 +62,54 @@ jobs:
           EXTRA_DOC_ONLY_REGEX: ${{ inputs.extra_doc_only_regex }}
         run: |
           set -euo pipefail
+
+          # --- Pin-Bump-Erkennung (PB LLC §3.4 v7.0.5) ------------------------------
+          # true, wenn der GESAMTE Diff ausschliesslich den Versions-Tag bestehender
+          # Org-Reusable-uses-Zeilen in .github/workflows/*.yml aendert (kein Ziel-/
+          # with:-/Zeilen-Wechsel, kein Major-Bump, keine weiteren Hunks/Dateien).
+          # DIESE FUNKTION IST BYTE-IDENTISCH zu scripts/gate-2-doc-only-selftest.sh.
+          is_pin_bump() {
+            local JSON nfiles bad i patch line body key major addf rmf
+            JSON="$(cat)"
+            nfiles=$(printf '%s' "$JSON" | jq 'length')
+            case "$nfiles" in ''|*[!0-9]*) echo false; return;; esac
+            [ "$nfiles" -gt 0 ] || { echo false; return; }
+            # (a) jede geaenderte Datei ist ein Workflow-File
+            bad=$(printf '%s' "$JSON" | jq -r '[.[] | select((.filename|test("^\\.github/workflows/[^/]+\\.ya?ml$"))|not)] | length')
+            [ "$bad" = "0" ] || { echo false; return; }
+            addf="$(mktemp)"; rmf="$(mktemp)"
+            i=0
+            while [ "$i" -lt "$nfiles" ]; do
+              patch=$(printf '%s' "$JSON" | jq -r ".[$i].patch // \"\"")
+              while IFS= read -r line; do
+                case "$line" in
+                  '+++'*|'---'*|'@@'*|' '*|'') : ;;
+                  '+'*|'-'*)
+                    # (b) jede +/- Zeile MUSS eine Org-Reusable-uses-Zeile mit Semver-Tag sein
+                    if ! printf '%s\n' "$line" | grep -qE '^[-+][[:space:]]*uses:[[:space:]]*Paul-Brandenburg-LLC/llc-workflow-templates/\.github/workflows/[A-Za-z0-9._-]+\.ya?ml@v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$'; then
+                      command rm -f "$addf" "$rmf"; echo false; return
+                    fi
+                    body=${line:1}
+                    major=$(printf '%s' "$body" | sed -E 's/.*@v([0-9]+)\.[0-9]+\.[0-9]+[[:space:]]*$/\1/')
+                    key=$(printf '%s' "$body" | sed -E 's/@v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$//')
+                    case "$line" in
+                      '+'*) printf '%s\t%s\n' "$key" "$major" >> "$addf" ;;
+                      '-'*) printf '%s\t%s\n' "$key" "$major" >> "$rmf"  ;;
+                    esac
+                    ;;
+                  *) : ;;
+                esac
+              done <<< "$patch"
+              i=$((i + 1))
+            done
+            # (e) mind. je eine +/- Zeile; (c)+(d) Multiset (key,major): added == removed
+            if [ -s "$addf" ] && [ -s "$rmf" ] && diff <(sort "$addf") <(sort "$rmf") >/dev/null; then
+              command rm -f "$addf" "$rmf"; echo true
+            else
+              command rm -f "$addf" "$rmf"; echo false
+            fi
+          }
+
           FILES=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json files --jq '.files[].path')
           DOC_ONLY=1
           while IFS= read -r f; do
@@ -83,13 +131,27 @@ jobs:
               DOC_ONLY=0
             fi
           fi
-          echo "skip=$([ "$DOC_ONLY" = "1" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
-      - name: Set status — Doc-only Skip
+          SKIP=false; REASON=""
+          if [ "$DOC_ONLY" = "1" ]; then
+            SKIP=true; REASON="Doc-only skip"
+          else
+            PATCHES=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --paginate | jq -s 'add')
+            if [ "$(printf '%s' "$PATCHES" | is_pin_bump)" = "true" ]; then
+              SKIP=true; REASON="pin-bump-skip (§3.4 v7.0.5)"
+            fi
+          fi
+          echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
+          echo "reason=$REASON" >> "$GITHUB_OUTPUT"
+
+      - name: Set status — Scope Skip (Doc-only / Pin-Bump)
         if: steps.scope.outputs.skip == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REASON: ${{ steps.scope.outputs.reason }}
         run: |
+          set -euo pipefail
+          echo "Gate 2 skip: $REASON"
           # Status unter BEIDEN Contexts posten: 'gate-2-codex' (Status-Name) und
           # 'bridge' (= Job-Name; manche Repos haben den als Required-Context).
           # Reusable-Job heisst 'bridge' → Check-Run 'bridge / bridge' matcht den
@@ -97,7 +159,7 @@ jobs:
           for ctx in gate-2-codex bridge; do
             gh api -X POST "/repos/$GITHUB_REPOSITORY/statuses/${{ steps.head.outputs.sha }}" \
               -f state=success -f context="$ctx" \
-              -f description="Doc-only skip"
+              -f description="$REASON"
           done
 
       - name: Read Codex Review/Comment (HEAD-bound, PB LLC §3.4 v7.0.0)
