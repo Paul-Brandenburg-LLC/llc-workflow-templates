@@ -1,7 +1,7 @@
 ---
 standard_version: "7.0.3"
 standard_pinned_at: "2026-07-05"
-plugin_version: "1.19.1"
+plugin_version: "1.19.2"
 prepush_stack: "static"
 tier: 4
 critical_paths: []
