@@ -151,6 +151,13 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/pin-bump-decide.sh"
           TARGET=".github/workflows/${TEMPLATE}"
 
+          # Default-Branch pro Repo auflösen — NICHT "main" hardcoden. trading-lab
+          # nutzt z.B. "unified-main"; der hardcodierte heads/main-Zugriff 404te
+          # und ließ das Repo bei jeder Welle still ausfallen (Realitäts-Audit
+          # 2026-07-06). Branch-Anlage, File-PUT und PR-Base folgen diesem Wert.
+          DEFAULT_BRANCH=$(gh api "/repos/${REPO}" --jq '.default_branch' 2>/dev/null)
+          [ -z "$DEFAULT_BRANCH" ] && { echo "::warning::$REPO: default_branch nicht ermittelbar — skip"; exit 0; }
+
           # 1. Read current target file via API.
           CURRENT=$(gh api "/repos/${REPO}/contents/${TARGET}" 2>/dev/null || echo '{}')
           SHA=$(echo "$CURRENT" | jq -r '.sha // empty')
@@ -171,7 +178,7 @@ jobs:
             CREATE_BRANCH="chore/seed-auto-pin-bump-caller-${TAG}"
             CREATE_MSG=$(printf 'chore(workflows): seed auto-pin-bump Thin-Caller (@%s)\n\nPB LLC §3.4 v7.0.4 — create-if-missing via propagate-templates.yml.\nRepo reagiert danach auf repository_dispatch [plugin-bump].' "$TAG")
             # Branch von main (idempotent bei Re-Run).
-            CREATE_MAIN_SHA=$(gh api "/repos/${REPO}/git/ref/heads/main" --jq '.object.sha')
+            CREATE_MAIN_SHA=$(gh api "/repos/${REPO}/git/ref/heads/${DEFAULT_BRANCH}" --jq '.object.sha')
             gh api -X POST "/repos/${REPO}/git/refs" \
               -f "ref=refs/heads/${CREATE_BRANCH}" \
               -f "sha=${CREATE_MAIN_SHA}" \
@@ -190,7 +197,7 @@ jobs:
             gh api -X PUT "/repos/${REPO}/contents/${TARGET}" --input - <<<"$CREATE_PAYLOAD" > /dev/null
             CREATE_PR_URL=$(gh pr create \
               --repo "$REPO" \
-              --base main \
+              --base "$DEFAULT_BRANCH" \
               --head "$CREATE_BRANCH" \
               --title "chore(workflows): seed auto-pin-bump Thin-Caller @${TAG}" \
               --body "PB LLC §3.4 v7.0.4 — create-if-missing Seed des auto-pin-bump Thin-Callers.
@@ -285,7 +292,7 @@ jobs:
           NEW_B64=$(printf '%s\n' "$NEW_CONTENT" | base64 | tr -d '\n')
 
           # 5. Create branch (idempotent).
-          MAIN_SHA=$(gh api "/repos/${REPO}/git/ref/heads/main" --jq '.object.sha')
+          MAIN_SHA=$(gh api "/repos/${REPO}/git/ref/heads/${DEFAULT_BRANCH}" --jq '.object.sha')
           gh api -X POST "/repos/${REPO}/git/refs" \
             -f "ref=refs/heads/${BRANCH}" \
             -f "sha=${MAIN_SHA}" \
@@ -305,7 +312,7 @@ jobs:
           # 7. Open PR + Auto-Merge armen.
           PR_URL=$(gh pr create \
             --repo "$REPO" \
-            --base main \
+            --base "$DEFAULT_BRANCH" \
             --head "$BRANCH" \
             --title "$PR_TITLE" \
             --body "PB LLC §3.4 — ${PR_LEAD}
