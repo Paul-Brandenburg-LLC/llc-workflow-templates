@@ -95,21 +95,24 @@ jobs:
           set -euo pipefail
           # §0.5 v7.0.4 Vollzugsmeldungs-Pflicht: Grundmenge = reale Org (aktiv,
           # nicht archiviert), nie eine statische Arbeitsliste (Realitäts-Audit
-          # 2026-07-06). Zwei Repos werden bewusst ausgenommen:
-          #   - llc-claude-plugin (Hub): pinnt sich in der Release-Session selbst
-          #     und ist Quelle des plugin-bump-Dispatch (kein Fremd-Seed/Bump).
-          #   - dieses Repo selbst (SELF_REPO): hier IST .github/workflows/<template>
-          #     die Reusable-Datei, KEIN Thin-Caller — ein Propagate gegen sich
-          #     selbst würde die Reusable mit einem Caller-Wrapper überschreiben.
-          #     Die alte Hardcode-Matrix listete sich implizit nie.
+          # 2026-07-06). Ausnahmen:
+          #   - dieses Repo selbst (SELF_REPO): IMMER aus — hier IST
+          #     .github/workflows/<template> die Reusable-Datei, KEIN Thin-Caller;
+          #     ein Propagate gegen sich selbst würde die Reusable mit einem
+          #     Caller-Wrapper überschreiben. Alte Hardcode-Matrix listete sich nie.
+          #   - llc-claude-plugin (Hub): NUR bei template=auto-pin-bump.yml aus —
+          #     er ist Quelle des plugin-bump-Dispatch und pinnt sich selbst, darf
+          #     also keinen auto-pin-bump-Caller bekommen. Für andere Templates
+          #     (z.B. gate-2-codex.yml) ist der Hub ein normaler Consumer → drin.
           ACTIVE=$(gh repo list Paul-Brandenburg-LLC --limit 100 \
             --json name,isArchived \
             --jq '.[] | select(.isArchived==false) | .name' | sort)
           REPOS='[]'
           EXCLUDED=""
           for r in $ACTIVE; do
-            if [ "$r" = "llc-claude-plugin" ] || [ "$r" = "$SELF_REPO" ]; then
-              EXCLUDED="$EXCLUDED $r"; continue
+            if [ "$r" = "$SELF_REPO" ]; then EXCLUDED="$EXCLUDED $r(self)"; continue; fi
+            if [ "$TEMPLATE" = "auto-pin-bump.yml" ] && [ "$r" = "llc-claude-plugin" ]; then
+              EXCLUDED="$EXCLUDED $r(hub)"; continue
             fi
             REPOS=$(printf '%s' "$REPOS" | jq -c --arg r "$r" '. + [$r]')
           done
