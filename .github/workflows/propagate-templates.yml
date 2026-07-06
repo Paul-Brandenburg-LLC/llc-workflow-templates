@@ -90,20 +90,27 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.org-token.outputs.token }}
           TEMPLATE: ${{ needs.detect.outputs.template }}
+          SELF_REPO: ${{ github.event.repository.name }}
         run: |
           set -euo pipefail
           # §0.5 v7.0.4 Vollzugsmeldungs-Pflicht: Grundmenge = reale Org (aktiv,
           # nicht archiviert), nie eine statische Arbeitsliste (Realitäts-Audit
-          # 2026-07-06). Der Hub llc-claude-plugin wird bewusst ausgenommen — er
-          # pinnt sich in der Release-Session selbst und ist Quelle des
-          # plugin-bump-Dispatch (kein Fremd-Seed/Bump).
+          # 2026-07-06). Zwei Repos werden bewusst ausgenommen:
+          #   - llc-claude-plugin (Hub): pinnt sich in der Release-Session selbst
+          #     und ist Quelle des plugin-bump-Dispatch (kein Fremd-Seed/Bump).
+          #   - dieses Repo selbst (SELF_REPO): hier IST .github/workflows/<template>
+          #     die Reusable-Datei, KEIN Thin-Caller — ein Propagate gegen sich
+          #     selbst würde die Reusable mit einem Caller-Wrapper überschreiben.
+          #     Die alte Hardcode-Matrix listete sich implizit nie.
           ACTIVE=$(gh repo list Paul-Brandenburg-LLC --limit 100 \
             --json name,isArchived \
             --jq '.[] | select(.isArchived==false) | .name' | sort)
           REPOS='[]'
           EXCLUDED=""
           for r in $ACTIVE; do
-            if [ "$r" = "llc-claude-plugin" ]; then EXCLUDED="$EXCLUDED $r"; continue; fi
+            if [ "$r" = "llc-claude-plugin" ] || [ "$r" = "$SELF_REPO" ]; then
+              EXCLUDED="$EXCLUDED $r"; continue
+            fi
             REPOS=$(printf '%s' "$REPOS" | jq -c --arg r "$r" '. + [$r]')
           done
           COUNT=$(printf '%s' "$REPOS" | jq 'length')
