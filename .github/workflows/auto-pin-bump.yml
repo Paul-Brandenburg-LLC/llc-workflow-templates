@@ -78,11 +78,22 @@ jobs:
             -f sha="$BASE_SHA" -F force=true
 
           # PUT (auto-signed als GitHub App); FILE_SHA gilt, weil der Branch
-          # soeben auf main zurückgesetzt wurde
+          # soeben auf main zurückgesetzt wurde.
+          # v1.5.2: Payload via --input-Datei statt -f content=<argv> — grosse
+          # CLAUDE.md sprengt sonst ARG_MAX ("/usr/bin/gh: Argument list too
+          # long", Beleg paulbrandenburg-com-site Run 2026-07-06, Welle
+          # v1.19.2; gleiche Klasse wie die v5.8-Lehre in standards/publish.yml).
           NEW_B64=$(echo "$NEW_CONTENT" | base64 | tr -d '\n')
-          gh api -X PUT "/repos/$REPO/contents/CLAUDE.md" \
-            -f message="chore(plugin): bump pin to v$NEW_VERSION (auto via propagate-plugin-bump §3.4 v7.0.3)" \
-            -f content="$NEW_B64" -f sha="$FILE_SHA" -f branch="$BRANCH"
+          PAYLOAD=$(mktemp)
+          printf '%s' "$NEW_B64" > "${PAYLOAD}.b64"
+          jq -n \
+            --arg m "chore(plugin): bump pin to v$NEW_VERSION (auto via propagate-plugin-bump §3.4 v7.0.3)" \
+            --rawfile c "${PAYLOAD}.b64" \
+            --arg s "$FILE_SHA" \
+            --arg b "$BRANCH" \
+            '{message: $m, content: $c, sha: $s, branch: $b}' > "$PAYLOAD"
+          gh api -X PUT "/repos/$REPO/contents/CLAUDE.md" --input "$PAYLOAD"
+          rm -f "$PAYLOAD" "${PAYLOAD}.b64"
 
           # Body mit ECHTEN Newlines — gh api -f interpretiert keine \n-Escapes
           BODY=$(printf '## Summary\nAuto-PR aus llc-claude-plugin Plugin-Tag-Push. Reine Frontmatter-Änderung (App-signed via API-PUT).\n\n## Blast-Radius\n- [x] klein')
