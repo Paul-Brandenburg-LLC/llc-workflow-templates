@@ -185,7 +185,7 @@ jobs:
               'if $sh == "" then {message:$msg, content:$ct, branch:$br}
                else {message:$msg, content:$ct, branch:$br, sha:$sh} end')
             gh api -X PUT "/repos/${REPO}/contents/${TARGET}" --input - <<<"$CREATE_PAYLOAD" > /dev/null
-            gh pr create \
+            CREATE_PR_URL=$(gh pr create \
               --repo "$REPO" \
               --base main \
               --head "$CREATE_BRANCH" \
@@ -205,9 +205,17 @@ jobs:
           - [x] T1 yaml-syntax (Reusable @${TAG} auto-validiert)
           - [ ] T2a CI muss gruen laufen
 
-          🤖 Auto-PR via propagate-templates.yml" \
-              && echo "::notice::CREATE PR opened in $REPO" \
-              || echo "::warning::CREATE PR creation failed in $REPO"
+          🤖 Auto-PR via propagate-templates.yml" || true)
+            if [ -n "$CREATE_PR_URL" ]; then
+              echo "::notice::CREATE PR opened in $REPO: $CREATE_PR_URL"
+              # Auto-Merge armen (tolerant, Muster auto-pin-bump-Reusable): Repos ohne
+              # Allow-auto-merge oder mit Workflow-Change-BP fallen auf ::warning:: →
+              # Release-Session approved/merged (App-Author = Bot-Whitelist).
+              gh pr merge "$CREATE_PR_URL" --repo "$REPO" --auto --merge \
+                || echo "::warning::Auto-Merge nicht armierbar in $REPO ($CREATE_PR_URL) — Approve/Merge durch Release-Session"
+            else
+              echo "::warning::CREATE PR creation failed in $REPO"
+            fi
             exit 0
           fi
           BODY_DECODED=$(echo "$CURRENT" | jq -r '.content // ""' | base64 -d 2>/dev/null || echo "")
@@ -291,8 +299,8 @@ jobs:
             '{message: $msg, content: $ct, branch: $br, sha: $sh}')
           gh api -X PUT "/repos/${REPO}/contents/${TARGET}" --input - <<<"$PUT_PAYLOAD" > /dev/null
 
-          # 7. Open PR.
-          gh pr create \
+          # 7. Open PR + Auto-Merge armen.
+          PR_URL=$(gh pr create \
             --repo "$REPO" \
             --base main \
             --head "$BRANCH" \
@@ -312,9 +320,17 @@ jobs:
           - [x] T1 yaml-syntax (auto-validated by templates@${TAG})
           - [ ] T2a CI muss gruen laufen
 
-          🤖 Auto-PR via propagate-templates.yml" \
-            && echo "::notice::PR opened in $REPO" \
-            || echo "::warning::PR creation failed in $REPO"
+          🤖 Auto-PR via propagate-templates.yml" || true)
+          if [ -n "$PR_URL" ]; then
+            echo "::notice::PR opened in $REPO: $PR_URL"
+            # Auto-Merge armen (tolerant, Muster auto-pin-bump-Reusable): löst das
+            # Hängen der auto=false-PRs vergangener Wellen. Repos ohne Allow-auto-
+            # merge oder mit Workflow-Change-BP → ::warning:: (Release-Session merged).
+            gh pr merge "$PR_URL" --repo "$REPO" --auto --merge \
+              || echo "::warning::Auto-Merge nicht armierbar in $REPO ($PR_URL) — Approve/Merge durch Release-Session"
+          else
+            echo "::warning::PR creation failed in $REPO"
+          fi
 
   summary:
     needs: propagate
