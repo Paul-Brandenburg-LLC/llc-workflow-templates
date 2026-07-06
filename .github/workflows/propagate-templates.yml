@@ -1,19 +1,29 @@
 name: Propagate Templates
 
-# PB LLC §3.4 v5.11.2 — Auto-Sync der Reusable-Workflow-Templates.
+# PB LLC §3.4 v7.0.4 — Auto-Sync der Reusable-Workflow-Templates.
 # Bei Push auf main mit Änderung in .github/workflows/*.yml ODER bei neuem Tag v1.x.y
-# öffnet dieser Workflow Auto-PRs in allen 22 Adoption-Repos, die ihre
+# öffnet dieser Workflow Auto-PRs in allen aktiven Adoption-Repos, die ihre
 # statische Workflow-Datei (z.B. gate-2-codex.yml) durch einen Reusable-Aufruf
 # zu Paul-Brandenburg-LLC/llc-workflow-templates@v1.x.y ersetzen.
 #
 # Self-contained (kein repo-side Auto-Sync-Workflow nötig). Nutzt App-Token mit
 # contents:write + pull-requests:write Scope pro Repo.
 #
-# Zwei Modi (Entscheidung: scripts/pin-bump-decide.sh):
+# Ziel-Liste dynamisch (§0.5 v7.0.4 Vollzugsmeldungs-Pflicht, Realitäts-Audit
+# 2026-07-06): der discover-Job ermittelt die aktive Org zur Laufzeit
+# (gh repo list, nicht archiviert) statt aus einer statischen Matrix. Die alte
+# 22er-Hardcode-Liste trug das archivierte nn-acc-app und verpasste aktive Repos
+# (u.a. trading-lab, pb-comms, verfahrensregister) — Wellen meldeten „komplett"
+# gegen eine stale Arbeitsliste.
+#
+# Modi (Entscheidung: scripts/pin-bump-decide.sh, außer create):
 #   - migrate: statische Consumer-Datei -> Reusable-Aufruf@TAG (bisheriges Verhalten)
 #   - pinbump: bestehender exakter Reusable-Pin @vX.Y.Z < TAG (gleicher Major) -> @TAG
 #     (behebt: Exakt-Pinner bekamen Template-Fixes nie automatisch; nur @v1-Floater).
-#   Skip: bereits @TAG, Floating @v1, Commit-SHA-Pin, oder Major-Bump (= manuell).
+#   - create: NUR für template=auto-pin-bump.yml — Repos, denen die Datei ganz
+#     fehlt, bekommen einen neuen Thin-Caller (create-if-missing, §3.4 v7.0.4).
+#   Skip: bereits @TAG, Floating @v1, Commit-SHA-Pin, Major-Bump (= manuell), oder
+#     fehlende Datei bei anderem Template als auto-pin-bump.yml.
 # dry_run-Input: nur erkennen + loggen, keine Branches/PRs.
 
 on:
@@ -28,7 +38,7 @@ on:
         description: 'Templates-Tag (override; sonst latest semver tag)'
         required: false
       template:
-        description: 'Welche Template-Datei propagieren (gate-2-codex.yml | cold-start-ci.yml | all)'
+        description: 'Welche Template-Datei propagieren (gate-2-codex.yml | cold-start-ci.yml | auto-pin-bump.yml)'
         required: false
         default: 'gate-2-codex.yml'
       dry_run:
@@ -63,37 +73,52 @@ jobs:
           echo "template=$TEMPLATE" >> "$GITHUB_OUTPUT"
           echo "Tag: $TAG, Template: $TEMPLATE"
 
-  propagate:
+  discover:
     needs: detect
+    runs-on: ubuntu-latest
+    outputs:
+      repos: ${{ steps.list.outputs.repos }}
+    steps:
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2
+        id: org-token
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: Paul-Brandenburg-LLC
+      - name: Discover active org repos (dynamische Zielliste statt Hardcode-Matrix)
+        id: list
+        env:
+          GH_TOKEN: ${{ steps.org-token.outputs.token }}
+          TEMPLATE: ${{ needs.detect.outputs.template }}
+        run: |
+          set -euo pipefail
+          # §0.5 v7.0.4 Vollzugsmeldungs-Pflicht: Grundmenge = reale Org (aktiv,
+          # nicht archiviert), nie eine statische Arbeitsliste (Realitäts-Audit
+          # 2026-07-06). Der Hub llc-claude-plugin wird bewusst ausgenommen — er
+          # pinnt sich in der Release-Session selbst und ist Quelle des
+          # plugin-bump-Dispatch (kein Fremd-Seed/Bump).
+          ACTIVE=$(gh repo list Paul-Brandenburg-LLC --limit 100 \
+            --json name,isArchived \
+            --jq '.[] | select(.isArchived==false) | .name' | sort)
+          REPOS='[]'
+          EXCLUDED=""
+          for r in $ACTIVE; do
+            if [ "$r" = "llc-claude-plugin" ]; then EXCLUDED="$EXCLUDED $r"; continue; fi
+            REPOS=$(printf '%s' "$REPOS" | jq -c --arg r "$r" '. + [$r]')
+          done
+          COUNT=$(printf '%s' "$REPOS" | jq 'length')
+          echo "repos=$REPOS" >> "$GITHUB_OUTPUT"
+          echo "::notice::Propagate-Ziele für ${TEMPLATE} ($COUNT): $(printf '%s' "$REPOS" | jq -r 'join(", ")')"
+          [ -n "$EXCLUDED" ] && echo "::warning::Aktive Repos bewusst ausgenommen (§0.5 Abweichler-Ausweis):$EXCLUDED" || true
+
+  propagate:
+    needs: [detect, discover]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       max-parallel: 5
       matrix:
-        repo:
-          - ahud-app
-          - blockzocker-site
-          - backup-system
-          - bobstv-site
-          - devcluster-system
-          - devops-dashboard-app
-          - freiestimme-net-site
-          - geheimtreffen-site
-          - llc-claude-plugin
-          - llc-ops-backlog
-          - llc-paulbrandenburg-com-app
-          - mailer-app
-          - medienmaschine-app
-          - medienscanner-site
-          - nachrichtenmaschine-app
-          - nacktemark-de-site
-          - nn-acc-app
-          - nn-scriptwriter-app
-          - paulbrandenburg-com-site
-          - paulbrandenburg-shop-site
-          - remote-claude-system
-          - staatsterroristen-site
-          - standards
+        repo: ${{ fromJSON(needs.discover.outputs.repos) }}
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.2.2 — für scripts/pin-bump-decide.sh
       - uses: actions/create-github-app-token@v2
@@ -120,7 +145,62 @@ jobs:
           CURRENT=$(gh api "/repos/${REPO}/contents/${TARGET}" 2>/dev/null || echo '{}')
           SHA=$(echo "$CURRENT" | jq -r '.sha // empty')
           if [ -z "$SHA" ]; then
-            echo "::notice::$REPO has no $TARGET — skipping"
+            # Datei fehlt. create-if-missing gilt NUR für auto-pin-bump.yml
+            # (§3.4 v7.0.4) — andere Templates werden nicht flächig neu angelegt.
+            if [ "$TEMPLATE" != "auto-pin-bump.yml" ]; then
+              echo "::notice::$REPO has no $TARGET — skipping (kein create-if-missing für $TEMPLATE)"
+              exit 0
+            fi
+            echo "::notice::$REPO $TEMPLATE: mode=create (Datei fehlt → neuer Thin-Caller @$TAG)"
+            if [ "${DRY_RUN:-false}" = "true" ]; then
+              echo "DRY-RUN: wuerde 'create' fuer $REPO/$TARGET ausfuehren (neuer Thin-Caller @$TAG) -- kein Branch/PR"
+              exit 0
+            fi
+            CREATE_CONTENT=$(bash "$GITHUB_WORKSPACE/scripts/render-auto-pin-bump-caller.sh" "$TAG")
+            CREATE_B64=$(printf '%s\n' "$CREATE_CONTENT" | base64 | tr -d '\n')
+            CREATE_BRANCH="chore/seed-auto-pin-bump-caller-${TAG}"
+            CREATE_MSG=$(printf 'chore(workflows): seed auto-pin-bump Thin-Caller (@%s)\n\nPB LLC §3.4 v7.0.4 — create-if-missing via propagate-templates.yml.\nRepo reagiert danach auf repository_dispatch [plugin-bump].' "$TAG")
+            # Branch von main (idempotent bei Re-Run).
+            CREATE_MAIN_SHA=$(gh api "/repos/${REPO}/git/ref/heads/main" --jq '.object.sha')
+            gh api -X POST "/repos/${REPO}/git/refs" \
+              -f "ref=refs/heads/${CREATE_BRANCH}" \
+              -f "sha=${CREATE_MAIN_SHA}" \
+              > /dev/null 2>&1 || echo "::notice::branch ${CREATE_BRANCH} already exists in $REPO"
+            # PUT: ohne sha = create; falls ein Re-Run die Datei schon auf dem
+            # Branch angelegt hat, deren sha nachreichen (dann update statt 422).
+            CREATE_BRANCH_FILE=$(gh api "/repos/${REPO}/contents/${TARGET}?ref=${CREATE_BRANCH}" 2>/dev/null || echo '{}')
+            CREATE_BRANCH_SHA=$(echo "$CREATE_BRANCH_FILE" | jq -r '.sha // empty')
+            CREATE_PAYLOAD=$(jq -nc \
+              --arg msg "$CREATE_MSG" \
+              --arg ct "$CREATE_B64" \
+              --arg br "$CREATE_BRANCH" \
+              --arg sh "$CREATE_BRANCH_SHA" \
+              'if $sh == "" then {message:$msg, content:$ct, branch:$br}
+               else {message:$msg, content:$ct, branch:$br, sha:$sh} end')
+            gh api -X PUT "/repos/${REPO}/contents/${TARGET}" --input - <<<"$CREATE_PAYLOAD" > /dev/null
+            gh pr create \
+              --repo "$REPO" \
+              --base main \
+              --head "$CREATE_BRANCH" \
+              --title "chore(workflows): seed auto-pin-bump Thin-Caller @${TAG}" \
+              --body "PB LLC §3.4 v7.0.4 — create-if-missing Seed des auto-pin-bump Thin-Callers.
+
+          ## Blast-Radius
+
+          - [x] klein
+          - [ ] mittel
+          - [ ] groß
+
+          Neue Datei .github/workflows/auto-pin-bump.yml — Thin-Caller auf den Reusable @${TAG}. Repo reagiert danach auf repository_dispatch [plugin-bump]. Kein bestehender Code-Path berührt.
+
+          ## Test-Plan
+
+          - [x] T1 yaml-syntax (Reusable @${TAG} auto-validiert)
+          - [ ] T2a CI muss gruen laufen
+
+          🤖 Auto-PR via propagate-templates.yml" \
+              && echo "::notice::CREATE PR opened in $REPO" \
+              || echo "::warning::CREATE PR creation failed in $REPO"
             exit 0
           fi
           BODY_DECODED=$(echo "$CURRENT" | jq -r '.content // ""' | base64 -d 2>/dev/null || echo "")
