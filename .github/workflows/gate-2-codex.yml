@@ -15,6 +15,15 @@ on:
         type: boolean
         default: true
         required: false
+      extra_doc_only_regex:
+        # PB LLC §3.4 v7.0.4 Render-PR-Regel (Realitäts-Audit 2026-07-06): erlaubt einem
+        # Consumer, weitere Pfade als doc-only zu deklarieren, die Codex nicht braucht
+        # (z.B. gerenderte Spec-HTML). Render-PRs #295/#298 hingen an der Bot-PR-Mention-
+        # Lücke, weil ihr Diff hier nicht als doc-only durchging. Leer = kein Extra-Match.
+        description: 'Zusätzliches Regex (bash =~), das Pfade als doc-only wertet; leer = deaktiviert'
+        type: string
+        default: ''
+        required: false
 
 permissions:
   pull-requests: read
@@ -50,17 +59,21 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          EXTRA_DOC_ONLY_REGEX: ${{ inputs.extra_doc_only_regex }}
         run: |
           set -euo pipefail
           FILES=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json files --jq '.files[].path')
           DOC_ONLY=1
           while IFS= read -r f; do
             [ -z "$f" ] && continue
+            # Eine Datei ist doc-only, wenn sie eines der Standard-Muster ODER (falls gesetzt)
+            # das Consumer-Extra-Regex matcht (PB LLC §3.4 v7.0.4 Render-PR-Regel).
             if [[ ! "$f" =~ \.(md|markdown)$ ]] && \
                [[ ! "$f" =~ ^docs/ ]] && \
                [[ ! "$f" =~ ^CHANGELOG ]] && \
                [[ ! "$f" =~ ^\.github/ISSUE_TEMPLATE/ ]] && \
-               [[ ! "$f" =~ ^feedback_.*\.md$ ]]; then
+               [[ ! "$f" =~ ^feedback_.*\.md$ ]] && \
+               { [ -z "$EXTRA_DOC_ONLY_REGEX" ] || [[ ! "$f" =~ $EXTRA_DOC_ONLY_REGEX ]]; }; then
               DOC_ONLY=0; break
             fi
           done <<< "$FILES"
