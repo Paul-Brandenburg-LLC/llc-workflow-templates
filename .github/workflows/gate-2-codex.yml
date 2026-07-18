@@ -15,6 +15,15 @@ on:
         type: boolean
         default: true
         required: false
+      bot_exempt_extra_contexts:
+        # PB LLC §3.4 v7.1.0 Bot-PR-Konklusivitaets-Pflicht: Governance-Contexts, die
+        # dieser Reusable auf Bot-PRs zentral auf success (bot-exempt) setzt, zusaetzlich
+        # zu gate-2-codex/bridge/pr-template-gate/review. Repos mit e2e-Required-Check
+        # uebergeben 'e2e'. Leerzeichen-separiert.
+        description: 'Zusätzliche Status-Contexts für den bot-exempt-Pfad (z. B. "e2e")'
+        type: string
+        default: ''
+        required: false
       extra_doc_only_regex:
         # PB LLC §3.4 v7.0.4 Render-PR-Regel (Realitäts-Audit 2026-07-06): erlaubt einem
         # Consumer, weitere Pfade als doc-only zu deklarieren, die Codex nicht braucht
@@ -80,9 +89,15 @@ jobs:
         if: steps.head.outputs.bot_exempt == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          EXTRA_CONTEXTS: ${{ inputs.bot_exempt_extra_contexts }}
         run: |
           set -euo pipefail
-          for ctx in gate-2-codex bridge; do
+          # Zentraler Status-Post fuer ALLE Governance-Contexts: die per-Repo-Jobs
+          # (pr-template-gate, review) skippen sich auf Bot-PRs bzw. haben keine
+          # Secrets — ein Required-Context wird aber auch durch einen Commit-Status
+          # gleichen Namens erfuellt (Bridge-Pattern). So braucht die Adoption keine
+          # review.yml-Aenderung pro Repo (Self-Mod-Lock §16.10).
+          for ctx in gate-2-codex bridge pr-template-gate review $EXTRA_CONTEXTS; do
             gh api -X POST "/repos/$GITHUB_REPOSITORY/statuses/${{ steps.head.outputs.sha }}" \
               -f state=success -f context="$ctx" \
               -f description="bot-exempt (§3.4 v7.1.0) — Test-Checks bleiben massgeblich"
