@@ -65,10 +65,21 @@ jobs:
           esac
           echo "bot_exempt=$BOT_EXEMPT" >> "$GITHUB_OUTPUT"
 
+      # Dependabot-getriggerte Runs haben ein read-only GITHUB_TOKEN → Status-POST
+      # wuerde 403en (Codex-P1, llc-workflow-templates#30). Deshalb App-Token aus den
+      # Org-DEPENDABOT-Secrets (APP_ID/APP_PRIVATE_KEY dort gespiegelt, 2026-07-18).
+      - name: Mint App-Token für Bot-exempt-Status
+        if: steps.head.outputs.bot_exempt == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@df432ceedc7162793a195dd1713ff69aefc7379e # v2.0.6
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
       - name: Set status — Bot-exempt (PB LLC §3.4 v7.1.0)
         if: steps.head.outputs.bot_exempt == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           for ctx in gate-2-codex bridge; do
