@@ -74,11 +74,13 @@ jobs:
           esac
           echo "bot_exempt=$BOT_EXEMPT" >> "$GITHUB_OUTPUT"
 
-      # Dependabot-getriggerte Runs haben ein read-only GITHUB_TOKEN → Status-POST
-      # wuerde 403en (Codex-P1, llc-workflow-templates#30). Deshalb App-Token aus den
-      # Org-DEPENDABOT-Secrets (APP_ID/APP_PRIVATE_KEY dort gespiegelt, 2026-07-18).
-      - name: Mint App-Token für Bot-exempt-Status
-        if: steps.head.outputs.bot_exempt == 'true'
+      # NUR Dependabot-getriggerte Runs haben ein read-only GITHUB_TOKEN → dort
+      # App-Token aus den Org-DEPENDABOT-Secrets (APP_ID/APP_PRIVATE_KEY gespiegelt
+      # 2026-07-18). Für andere Bot-Autoren (pb-llc-auto-fix-bot-PRs) hat das normale
+      # GITHUB_TOKEN statuses:write — der App-Token hätte es NICHT (403-Befund
+      # blockzocker#257: App-Permissions sind Contents+PR only, §4).
+      - name: Mint App-Token für Bot-exempt-Status (nur Dependabot-Runs)
+        if: steps.head.outputs.bot_exempt == 'true' && github.actor == 'dependabot[bot]'
         id: app-token
         uses: actions/create-github-app-token@df432ceedc7162793a195dd1713ff69aefc7379e # v2.0.6
         with:
@@ -88,7 +90,7 @@ jobs:
       - name: Set status — Bot-exempt (PB LLC §3.4 v7.1.0)
         if: steps.head.outputs.bot_exempt == 'true'
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
           EXTRA_CONTEXTS: ${{ inputs.bot_exempt_extra_contexts }}
         run: |
           set -euo pipefail
