@@ -354,12 +354,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          FAILED=$(gh api "/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
-            --paginate \
-            --jq '[.jobs[] | select(.name | startswith("propagate")) | select(.conclusion == "failure")] | length')
-          TOTAL=$(gh api "/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
-            --paginate \
-            --jq '[.jobs[] | select(.name | startswith("propagate"))] | length')
+          # `/actions/runs/*/jobs` liefert ein OBJEKT ({total_count, jobs:[...]}), keine
+          # Liste — `gh api --paginate` fuehrt solche Antworten nie zusammen, und `--jq`
+          # laeuft ohnehin je Seite. Ab 31 Jobs zaehlte `length` deshalb pro Seite und
+          # `FAILED` waere mehrzeilig geworden ("3\n2") → `[ "$FAILED" -gt 2 ]` bricht mit
+          # "integer expression expected" ab. Seiten daher explizit slurpen und die
+          # jobs-Arrays flach ziehen. Siehe scripts/gate-2-paginate-selftest.sh.
+          JOBS=$(gh api "/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
+            --paginate | jq -s '[(.[] | .jobs // [])[]]')
+          FAILED=$(printf '%s' "$JOBS" \
+            | jq '[.[] | select(.name | startswith("propagate")) | select(.conclusion == "failure")] | length')
+          TOTAL=$(printf '%s' "$JOBS" \
+            | jq '[.[] | select(.name | startswith("propagate"))] | length')
           echo "Result: $FAILED/$TOTAL failed"
           if [ "$FAILED" -gt 2 ]; then
             echo "::error::More than 2 repos failed propagation ($FAILED/$TOTAL)"

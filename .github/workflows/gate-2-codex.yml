@@ -188,7 +188,7 @@ jobs:
           if [ "$DOC_ONLY" = "1" ]; then
             SKIP=true; REASON="Doc-only skip"
           else
-            PATCHES=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --paginate | jq -s 'add')
+            PATCHES=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --paginate | jq -s '(add // [])')
             if [ "$(printf '%s' "$PATCHES" | is_pin_bump)" = "true" ]; then
               SKIP=true; REASON="pin-bump-skip (§3.4 v7.0.5)"
             fi
@@ -229,26 +229,39 @@ jobs:
           SHORT_SHA="${HEAD_SHA:0:7}"
 
           # --- Vollstaendigkeits-Pflicht (v1.6.2, Befund geheimtreffen-site#107) --------
-          # BEIDE Abfragen MUESSEN `--paginate` tragen. Ohne das liefert die REST-API nur
-          # die erste Seite = 30 Eintraege; GitHub sortiert aufsteigend, das NEUESTE steht
-          # also am Ende und faellt als erstes weg. Ein PR mit >30 Kommentaren war damit
-          # strukturell unmergebar: das Gate sah null Codex-Kommentare, blieb auf pending
-          # und jede weitere Review-Runde schob das Urteil tiefer auf Seite 2.
+          # (1) BEIDE Abfragen MUESSEN `--paginate` tragen. Ohne das liefert die REST-API
+          # nur die erste Seite = 30 Eintraege; GitHub sortiert aufsteigend, das NEUESTE
+          # steht also am Ende und faellt als erstes weg. Ein PR mit >30 Kommentaren war
+          # damit strukturell unmergebar: das Gate sah null Codex-Kommentare, blieb auf
+          # pending und jede weitere Review-Runde schob das Urteil tiefer auf Seite 2.
           # Belegt: #107 (33 Kommentare) -> ohne --paginate kein Verdict, mit --paginate
           # success. #106 (17) und #108 (12) kamen nur durch, weil sie unter 30 lagen.
+          #
+          # (2) Die Seiten MUESSEN vor der Auswahl zusammengefuehrt werden (`jq -s`), statt
+          # `--jq` den Filter je Seite anwenden zu lassen (Codex-P1 auf PR #32). `gh api
+          # --paginate` gibt laut Handbuch jede Seite einzeln aus; `sort_by | last` liefert
+          # dann ein Ergebnis PRO SEITE — `REVIEW_SHA` wuerde mehrzeilig und koennte nie
+          # `HEAD_SHA` gleichen, und ein veraltetes `failure` koennte ein aktuelles
+          # `success` ueberschreiben. Neuere gh-Versionen aggregieren Array-Antworten still,
+          # aber das ist undokumentiert, versionsabhaengig und gilt fuer Objekt-Antworten
+          # (z.B. /actions/runs/*/jobs) ueberhaupt nicht. Deshalb immer explizit slurpen.
+          # `(add // [])` ist Pflicht: bei leerer Eingabe liefert `add` `null`.
           # Beweis: scripts/gate-2-paginate-selftest.sh
           # -----------------------------------------------------------------------------
 
           # Neuestes formales Codex-Review + der EXAKTE Commit, den es begutachtet hat.
-          LATEST_REVIEW=$(gh api --paginate "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
-            --jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]")] | sort_by(.submitted_at) | last // {}' 2>/dev/null || echo '{}')
+          LATEST_REVIEW=$(gh api --paginate "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" 2>/dev/null \
+            | jq -s '(add // []) | [.[] | select(.user.login == "chatgpt-codex-connector[bot]")] | sort_by(.submitted_at) | last // {}' 2>/dev/null || echo '{}')
+          [ -n "$LATEST_REVIEW" ] || LATEST_REVIEW='{}'
           REVIEW_STATE=$(echo "$LATEST_REVIEW" | jq -r '.state // empty')
           REVIEW_SHA=$(echo "$LATEST_REVIEW"   | jq -r '.commit_id // empty')
           REVIEW_BODY=$(echo "$LATEST_REVIEW"  | jq -r '.body // empty')
 
           # Neuester Codex-Kommentar (Kommentare tragen keine commit_id → HEAD-SHA muss im Body stehen).
-          COMMENT_BODY=$(gh api --paginate "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-            --jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]")] | sort_by(.created_at) | last | .body // empty' 2>/dev/null || echo "")
+          # `-r`, weil `eval_body()` auf Zeilenanfaenge prueft (`^Codex Review: `) — ein
+          # gequoteter JSON-String wuerde daran scheitern.
+          COMMENT_BODY=$(gh api --paginate "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" 2>/dev/null \
+            | jq -sr '(add // []) | [.[] | select(.user.login == "chatgpt-codex-connector[bot]")] | sort_by(.created_at) | last | .body // empty' 2>/dev/null || echo "")
 
           STATE=pending
           DESC="Awaiting Codex review for current HEAD"
