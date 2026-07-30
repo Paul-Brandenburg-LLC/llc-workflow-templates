@@ -228,15 +228,26 @@ jobs:
           # neuen, ungeprüften Commit B übertragen (Stale-Approval-Loch, Audit-Befund). ---
           SHORT_SHA="${HEAD_SHA:0:7}"
 
+          # --- Vollstaendigkeits-Pflicht (v1.6.2, Befund geheimtreffen-site#107) --------
+          # BEIDE Abfragen MUESSEN `--paginate` tragen. Ohne das liefert die REST-API nur
+          # die erste Seite = 30 Eintraege; GitHub sortiert aufsteigend, das NEUESTE steht
+          # also am Ende und faellt als erstes weg. Ein PR mit >30 Kommentaren war damit
+          # strukturell unmergebar: das Gate sah null Codex-Kommentare, blieb auf pending
+          # und jede weitere Review-Runde schob das Urteil tiefer auf Seite 2.
+          # Belegt: #107 (33 Kommentare) -> ohne --paginate kein Verdict, mit --paginate
+          # success. #106 (17) und #108 (12) kamen nur durch, weil sie unter 30 lagen.
+          # Beweis: scripts/gate-2-paginate-selftest.sh
+          # -----------------------------------------------------------------------------
+
           # Neuestes formales Codex-Review + der EXAKTE Commit, den es begutachtet hat.
-          LATEST_REVIEW=$(gh api "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
+          LATEST_REVIEW=$(gh api --paginate "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
             --jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]")] | sort_by(.submitted_at) | last // {}' 2>/dev/null || echo '{}')
           REVIEW_STATE=$(echo "$LATEST_REVIEW" | jq -r '.state // empty')
           REVIEW_SHA=$(echo "$LATEST_REVIEW"   | jq -r '.commit_id // empty')
           REVIEW_BODY=$(echo "$LATEST_REVIEW"  | jq -r '.body // empty')
 
           # Neuester Codex-Kommentar (Kommentare tragen keine commit_id → HEAD-SHA muss im Body stehen).
-          COMMENT_BODY=$(gh api "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+          COMMENT_BODY=$(gh api --paginate "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
             --jq '[.[] | select(.user.login == "chatgpt-codex-connector[bot]")] | sort_by(.created_at) | last | .body // empty' 2>/dev/null || echo "")
 
           STATE=pending
