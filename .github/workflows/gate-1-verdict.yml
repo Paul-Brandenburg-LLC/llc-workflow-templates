@@ -73,8 +73,12 @@ jobs:
           set -euo pipefail
           # Neueste Review-Bot-Kommentare, neueste zuerst, Bodies base64-kodiert
           # (Newline-safe). Erster Kommentar mit HEAD-passendem Marker gewinnt.
-          mapfile -t B64 < <(gh api "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate \
-            --jq "[.[] | select(.user.login==\"$REVIEW_BOT\")] | sort_by(.created_at) | reverse | .[].body | @base64" 2>/dev/null || true)
+          # Seiten VOR der Sortierung zusammenfuehren (`jq -s`) — `--jq` wuerde den Filter
+          # je Seite anwenden, dann stuende der neueste Kommentar (letzte Seite) am ENDE
+          # der Liste und die Schleife naehme ein veraltetes Verdict. Siehe
+          # scripts/gate-2-paginate-selftest.sh und Codex-P1 auf llc-workflow-templates#32.
+          mapfile -t B64 < <(gh api "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate 2>/dev/null \
+            | jq -sr "(add // []) | [.[] | select(.user.login==\"$REVIEW_BOT\")] | sort_by(.created_at) | reverse | .[].body | @base64" 2>/dev/null || true)
 
           VERDICT=""
           for b in "${B64[@]:-}"; do
