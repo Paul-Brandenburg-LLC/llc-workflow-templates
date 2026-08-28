@@ -15,6 +15,14 @@ scope_is_doc_only() {
   FILES="$(cat)"
   while IFS= read -r f; do
     [ -z "$f" ] && continue
+    # DENY-FIRST (v1.8.0): deploybare Endungen sind NIE doc-only — auch dann
+    # nicht, wenn EXTRA_DOC_ONLY_REGEX sie matcht. Ein Render-Regex, das .html
+    # abdeckt, truege sonst jeden beliebigen Code-Diff am Codex-Tor vorbei.
+    # (Spec-Publish-PRs des Hubs laufen seit v1.8.0 ueber den bot-exempt-Pfad,
+    # Klasse 3 — sie brauchen dieses Loch nicht mehr.)
+    if [[ "$f" =~ \.(html?|php|css|js|mjs|cjs|ts|tsx|jsx|vue|svelte|py|rb|sql|sh|bash)$ ]]; then
+      DOC_ONLY=0; break
+    fi
     if [[ ! "$f" =~ \.(md|markdown)$ ]] && \
        [[ ! "$f" =~ ^docs/ ]] && \
        [[ ! "$f" =~ ^CHANGELOG ]] && \
@@ -99,11 +107,20 @@ V=$(printf 'feedback_x.md\ndocs/y.md\nCHANGELOG.md\n' | scope_is_doc_only ''); c
 # 4) Render-HTML OHNE Extra-Regex → NICHT doc-only (Regression-Schutz: Default-Verhalten)
 V=$(printf 'llc-checkliste-deploy/specs/v7.html\n' | scope_is_doc_only ''); check "render-html-no-extra→blocks" false "$V"
 
-# 5) Render-HTML MIT Extra-Regex → doc-only (Render-PR-Regel greift)
-V=$(printf 'llc-checkliste-deploy/specs/v7.html\n' | scope_is_doc_only "$RENDER_RE"); check "render-html-with-extra" true "$V"
+# 5) Render-HTML MIT Extra-Regex → seit v1.8.0 NICHT doc-only (DENY-FIRST schlaegt
+#    das Extra-Regex; Spec-Publish-PRs laufen ueber den bot-exempt-Klassenpfad)
+V=$(printf 'llc-checkliste-deploy/specs/v7.html\n' | scope_is_doc_only "$RENDER_RE"); check "render-html-with-extra→deny-first-blocks" false "$V"
 
-# 6) Render-HTML + Markdown MIT Extra-Regex → doc-only (Mix erlaubt)
-V=$(printf 'llc-checkliste-deploy/specs/v7.html\nREADME.md\n' | scope_is_doc_only "$RENDER_RE"); check "render-html+md-with-extra" true "$V"
+# 6) Render-HTML + Markdown MIT Extra-Regex → NICHT doc-only (DENY-FIRST, v1.8.0)
+V=$(printf 'llc-checkliste-deploy/specs/v7.html\nREADME.md\n' | scope_is_doc_only "$RENDER_RE"); check "render-html+md-with-extra→deny-first-blocks" false "$V"
+
+# 6b) DENY-FIRST greift fuer jede deploybare Endung, selbst mit Match-All-Regex
+V=$(printf 'index.php\n' | scope_is_doc_only '.*'); check "deny-first-php-vs-matchall" false "$V"
+V=$(printf 'assets/app.js\n' | scope_is_doc_only '.*'); check "deny-first-js-vs-matchall" false "$V"
+V=$(printf 'style.css\n' | scope_is_doc_only '.*'); check "deny-first-css-vs-matchall" false "$V"
+
+# 6c) Nicht-deploybare Endung MIT Extra-Regex bleibt erlaubt (deny-first ist eng)
+V=$(printf 'notes/plan.txt\n' | scope_is_doc_only '^notes/'); check "extra-regex-txt-still-allowed" true "$V"
 
 # 7) Render-HTML + Code MIT Extra-Regex → NICHT doc-only (Code bleibt blockierend)
 V=$(printf 'llc-checkliste-deploy/specs/v7.html\nsrc/app.ts\n' | scope_is_doc_only "$RENDER_RE"); check "render-html+code-with-extra→blocks" false "$V"

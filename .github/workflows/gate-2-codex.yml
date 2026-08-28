@@ -29,7 +29,11 @@ on:
         # Consumer, weitere Pfade als doc-only zu deklarieren, die Codex nicht braucht
         # (z.B. gerenderte Spec-HTML). Render-PRs #295/#298 hingen an der Bot-PR-Mention-
         # Lücke, weil ihr Diff hier nicht als doc-only durchging. Leer = kein Extra-Match.
-        description: 'Zusätzliches Regex (bash =~), das Pfade als doc-only wertet; leer = deaktiviert'
+        # ⚠ DEPRECATED seit v1.8.0: deploybare Endungen (html/php/css/js/…) sind per
+        # DENY-FIRST NIE doc-only, egal was hier steht; Spec-Publish-PRs laufen ueber
+        # den bot-exempt-Klassenpfad. Der Input bleibt nur, damit Consumer, die ihn noch
+        # uebergeben (Hub), beim Bump nicht am workflow_call-Schema scheitern.
+        description: 'DEPRECATED (v1.8.0, deny-first): Zusätzliches Regex (bash =~) für doc-only; deploybare Endungen matchen nie'
         type: string
         default: ''
         required: false
@@ -61,16 +65,59 @@ jobs:
           set -euo pipefail
           SHA=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          # --- Bot-PR-Konklusivitaets-Pflicht (PB LLC §3.4 v7.1.0) -------------------
+          # --- Bot-PR-Konklusivitaets-Pflicht (PB LLC §3.4 v7.1.0; Klassen-Gate v1.8.0) ---
           # Governance-Gates enden auf Bot-PRs konklusiv mit success (bot-exempt) —
           # ein skipped/ewig-pending Required-Check haelt den Merge-Knopf fuer immer zu
-          # (Befund 2026-07-18: 244 unmergebare Bot-PRs org-weit). Autor-basiert und
-          # event-unabhaengig, damit spaetere review/comment-Events das success nicht
-          # mit pending ueberschreiben. Merge-Entscheidung bleibt beim Sweep.
-          AUTHOR=$(gh api "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .user.login)
+          # (Befund 2026-07-18: 244 unmergebare Bot-PRs org-weit). Event-unabhaengig,
+          # damit spaetere review/comment-Events das success nicht mit pending
+          # ueberschreiben. Merge-Entscheidung bleibt beim Sweep.
+          #
+          # Seit v1.8.0 ist die Ausnahme ein KLASSEN-Gate statt Autor-Gate: der Autor
+          # allein exemptete JEDEN Diff des Bots — auch einen, der Code aendert. Jetzt
+          # muss der PR einer der vier gemessenen Bot-Werkslinien entsprechen (Branch +
+          # ggf. Titel + Diff-Pfade). Faellt ein Bot-PR durch, blockiert nichts: er
+          # laeuft durchs normale Codex-Tor und wartet auf ein Verdict.
+          PRJSON=$(gh api "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")
+          AUTHOR=$(printf '%s' "$PRJSON" | jq -r .user.login)
+          BRANCH=$(printf '%s' "$PRJSON" | jq -r .head.ref)
+          TITLE=$(printf '%s' "$PRJSON"  | jq -r .title)
+          alle_dateien_unter() {  # $1=Pfad-Regex; true, wenn der Diff >0 Dateien hat und JEDE matcht
+            local n bad
+            if [ -z "${FILES_JSON:-}" ]; then
+              FILES_JSON=$(gh api --paginate "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" | jq -s '(add // [])')
+            fi
+            n=$(printf '%s' "$FILES_JSON" | jq 'length')
+            case "$n" in ''|*[!0-9]*) return 1 ;; esac
+            [ "$n" -gt 0 ] || return 1
+            bad=$(printf '%s' "$FILES_JSON" | jq -r --arg re "$1" '[.[] | select((.filename|test($re))|not)] | length')
+            [ "$bad" = "0" ]
+          }
+          BOT_EXEMPT=false
           case "$AUTHOR" in
-            'dependabot[bot]'|'pb-llc-auto-fix-bot[bot]') BOT_EXEMPT=true ;;
-            *) BOT_EXEMPT=false ;;
+            'dependabot[bot]')
+              # (1) Dependabot arbeitet ausschliesslich auf eigenen Branches.
+              case "$BRANCH" in dependabot/*) BOT_EXEMPT=true ;; esac ;;
+            'pb-llc-auto-fix-bot[bot]')
+              if printf '%s\n' "$BRANCH" | grep -qE '^chore/pin-bump-[A-Za-z0-9._-]+-v[0-9]+\.[0-9]+\.[0-9]+$' \
+                 && printf '%s\n' "$TITLE" | grep -qiE 'pin|bump'; then
+                # (2a) Workflow-Pin-Welle (propagate-templates.yml; seed-/auto-sync-
+                #      Branches fallen BEWUSST durch — sie tragen echte Workflow-Diffs).
+                BOT_EXEMPT=true
+              elif [ "$BRANCH" = "chore/plugin-pin-bump" ] \
+                 && printf '%s\n' "$TITLE" | grep -qE '^chore\(plugin\): bump pin to v[0-9]+\.[0-9]+\.[0-9]+$'; then
+                # (2b) Plugin-Pin-Welle (auto-pin-bump.yml, fester Branch + Titelform).
+                BOT_EXEMPT=true
+              elif printf '%s\n' "$BRANCH" | grep -qE '^bot/publish-specs-[0-9]+$' \
+                 && alle_dateien_unter '^llc-checkliste-deploy/specs/'; then
+                # (3) Spec-Publish (Hub). MUSS exempt bleiben: haengt der Publish-PR,
+                #     steht der Render-Beweis aus -> Drift-Lock org-weit (Publish-Deadlock).
+                BOT_EXEMPT=true
+              elif printf '%s\n' "$BRANCH" | grep -qE '^chore/cloud-dispatch-[0-9]{8}-[0-9]{6}$' \
+                 && alle_dateien_unter '^tasks/'; then
+                # (4) Cloud-Dispatch-State (gemessen an llc-ops-backlog#1100/#1101:
+                #     Diff ausschliesslich tasks/*.yml).
+                BOT_EXEMPT=true
+              fi ;;
           esac
           echo "bot_exempt=$BOT_EXEMPT" >> "$GITHUB_OUTPUT"
 
@@ -166,6 +213,14 @@ jobs:
           DOC_ONLY=1
           while IFS= read -r f; do
             [ -z "$f" ] && continue
+            # DENY-FIRST (v1.8.0): deploybare Endungen sind NIE doc-only — auch dann
+            # nicht, wenn EXTRA_DOC_ONLY_REGEX sie matcht. Ein Render-Regex, das .html
+            # abdeckt, truege sonst jeden beliebigen Code-Diff am Codex-Tor vorbei.
+            # (Spec-Publish-PRs des Hubs laufen seit v1.8.0 ueber den bot-exempt-Pfad,
+            # Klasse 3 — sie brauchen dieses Loch nicht mehr.)
+            if [[ "$f" =~ \.(html?|php|css|js|mjs|cjs|ts|tsx|jsx|vue|svelte|py|rb|sql|sh|bash)$ ]]; then
+              DOC_ONLY=0; break
+            fi
             # Eine Datei ist doc-only, wenn sie eines der Standard-Muster ODER (falls gesetzt)
             # das Consumer-Extra-Regex matcht (PB LLC §3.4 v7.0.4 Render-PR-Regel).
             if [[ ! "$f" =~ \.(md|markdown)$ ]] && \
