@@ -81,17 +81,78 @@ jobs:
           AUTHOR=$(printf '%s' "$PRJSON" | jq -r .user.login)
           BRANCH=$(printf '%s' "$PRJSON" | jq -r .head.ref)
           TITLE=$(printf '%s' "$PRJSON"  | jq -r .title)
-          alle_dateien_unter() {  # $1=Pfad-Regex; true, wenn der Diff >0 Dateien hat und JEDE matcht
-            local n bad
+
+          # --- Geteilte Diff-Pruefung is_pin_bump (PB LLC §3.4 v7.0.5) ----------------
+          # EINE Definition fuer beide Steps (Klassen-Gate hier, Scope-Skip unten),
+          # via $RUNNER_TEMP-Lib. BYTE-IDENTISCH zu scripts/gate-2-doc-only-selftest.sh.
+          cat > "$RUNNER_TEMP/gate2-lib.sh" <<'LIB'
+          is_pin_bump() {
+            local JSON nfiles bad i patch line body key major addf rmf
+            JSON="$(cat)"
+            nfiles=$(printf '%s' "$JSON" | jq 'length')
+            case "$nfiles" in ''|*[!0-9]*) echo false; return;; esac
+            [ "$nfiles" -gt 0 ] || { echo false; return; }
+            # (a) jede geaenderte Datei ist ein Workflow-File
+            bad=$(printf '%s' "$JSON" | jq -r '[.[] | select((.filename|test("^\\.github/workflows/[^/]+\\.ya?ml$"))|not)] | length')
+            [ "$bad" = "0" ] || { echo false; return; }
+            addf="$(mktemp)"; rmf="$(mktemp)"
+            i=0
+            while [ "$i" -lt "$nfiles" ]; do
+              patch=$(printf '%s' "$JSON" | jq -r ".[$i].patch // \"\"")
+              while IFS= read -r line; do
+                case "$line" in
+                  '+++'*|'---'*|'@@'*|' '*|'') : ;;
+                  '+'*|'-'*)
+                    # (b) jede +/- Zeile MUSS eine Org-Reusable-uses-Zeile mit Semver-Tag sein
+                    if ! printf '%s\n' "$line" | grep -qE '^[-+][[:space:]]*uses:[[:space:]]*Paul-Brandenburg-LLC/llc-workflow-templates/\.github/workflows/[A-Za-z0-9._-]+\.ya?ml@v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$'; then
+                      command rm -f "$addf" "$rmf"; echo false; return
+                    fi
+                    body=${line:1}
+                    major=$(printf '%s' "$body" | sed -E 's/.*@v([0-9]+)\.[0-9]+\.[0-9]+[[:space:]]*$/\1/')
+                    key=$(printf '%s' "$body" | sed -E 's/@v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$//')
+                    case "$line" in
+                      '+'*) printf '%s\t%s\n' "$key" "$major" >> "$addf" ;;
+                      '-'*) printf '%s\t%s\n' "$key" "$major" >> "$rmf"  ;;
+                    esac
+                    ;;
+                  *) : ;;
+                esac
+              done <<< "$patch"
+              i=$((i + 1))
+            done
+            # (e) mind. je eine +/- Zeile; (c)+(d) Multiset (key,major): added == removed
+            if [ -s "$addf" ] && [ -s "$rmf" ] && diff <(sort "$addf") <(sort "$rmf") >/dev/null; then
+              command rm -f "$addf" "$rmf"; echo true
+            else
+              command rm -f "$addf" "$rmf"; echo false
+            fi
+          }
+          LIB
+          # shellcheck disable=SC1091
+          source "$RUNNER_TEMP/gate2-lib.sh"
+
+          lade_diff() {  # fuellt FILES_JSON (alle Diff-Dateien inkl. .patch) genau einmal
             if [ -z "${FILES_JSON:-}" ]; then
               FILES_JSON=$(gh api --paginate "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" | jq -s '(add // [])')
             fi
+          }
+          alle_dateien_unter() {  # $1=Pfad-Regex; true, wenn der Diff >0 Dateien hat und JEDE matcht
+            local n bad
+            lade_diff
             n=$(printf '%s' "$FILES_JSON" | jq 'length')
             case "$n" in ''|*[!0-9]*) return 1 ;; esac
             [ "$n" -gt 0 ] || return 1
             bad=$(printf '%s' "$FILES_JSON" | jq -r --arg re "$1" '[.[] | select((.filename|test($re))|not)] | length')
             [ "$bad" = "0" ]
           }
+          patch_zeilen_nur() {  # $1=Zeilen-Regex; true, wenn es +/- Patchzeilen gibt und JEDE matcht
+            local lines
+            lade_diff
+            lines=$(printf '%s' "$FILES_JSON" | jq -r '.[].patch // ""' | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' || true)
+            [ -n "$lines" ] || return 1
+            ! printf '%s\n' "$lines" | grep -qvE "$1"
+          }
+
           BOT_EXEMPT=false
           case "$AUTHOR" in
             'dependabot[bot]')
@@ -102,10 +163,16 @@ jobs:
                  && printf '%s\n' "$TITLE" | grep -qiE 'pin|bump'; then
                 # (2a) Workflow-Pin-Welle (propagate-templates.yml; seed-/auto-sync-
                 #      Branches fallen BEWUSST durch — sie tragen echte Workflow-Diffs).
-                BOT_EXEMPT=true
+                #      Diff-Gegenprobe: der GESAMTE Patch muss ein reiner Tag-Bump sein.
+                lade_diff
+                [ "$(printf '%s' "$FILES_JSON" | is_pin_bump)" = "true" ] && BOT_EXEMPT=true
               elif [ "$BRANCH" = "chore/plugin-pin-bump" ] \
-                 && printf '%s\n' "$TITLE" | grep -qE '^chore\(plugin\): bump pin to v[0-9]+\.[0-9]+\.[0-9]+$'; then
-                # (2b) Plugin-Pin-Welle (auto-pin-bump.yml, fester Branch + Titelform).
+                 && printf '%s\n' "$TITLE" | grep -qE '^chore\(plugin\): bump pin to v[0-9]+\.[0-9]+\.[0-9]+$' \
+                 && alle_dateien_unter '^CLAUDE\.md$' \
+                 && patch_zeilen_nur '^[+-]plugin_version: "[0-9]+\.[0-9]+\.[0-9]+"$'; then
+                # (2b) Plugin-Pin-Welle (auto-pin-bump.yml): Diff darf NUR die
+                #      plugin_version-Zeile in CLAUDE.md drehen (gemessen an
+                #      freiestimme-net-site#124).
                 BOT_EXEMPT=true
               elif printf '%s\n' "$BRANCH" | grep -qE '^bot/publish-specs-[0-9]+$' \
                  && alle_dateien_unter '^llc-checkliste-deploy/specs/'; then
@@ -166,48 +233,11 @@ jobs:
           # true, wenn der GESAMTE Diff ausschliesslich den Versions-Tag bestehender
           # Org-Reusable-uses-Zeilen in .github/workflows/*.yml aendert (kein Ziel-/
           # with:-/Zeilen-Wechsel, kein Major-Bump, keine weiteren Hunks/Dateien).
-          # DIESE FUNKTION IST BYTE-IDENTISCH zu scripts/gate-2-doc-only-selftest.sh.
-          is_pin_bump() {
-            local JSON nfiles bad i patch line body key major addf rmf
-            JSON="$(cat)"
-            nfiles=$(printf '%s' "$JSON" | jq 'length')
-            case "$nfiles" in ''|*[!0-9]*) echo false; return;; esac
-            [ "$nfiles" -gt 0 ] || { echo false; return; }
-            # (a) jede geaenderte Datei ist ein Workflow-File
-            bad=$(printf '%s' "$JSON" | jq -r '[.[] | select((.filename|test("^\\.github/workflows/[^/]+\\.ya?ml$"))|not)] | length')
-            [ "$bad" = "0" ] || { echo false; return; }
-            addf="$(mktemp)"; rmf="$(mktemp)"
-            i=0
-            while [ "$i" -lt "$nfiles" ]; do
-              patch=$(printf '%s' "$JSON" | jq -r ".[$i].patch // \"\"")
-              while IFS= read -r line; do
-                case "$line" in
-                  '+++'*|'---'*|'@@'*|' '*|'') : ;;
-                  '+'*|'-'*)
-                    # (b) jede +/- Zeile MUSS eine Org-Reusable-uses-Zeile mit Semver-Tag sein
-                    if ! printf '%s\n' "$line" | grep -qE '^[-+][[:space:]]*uses:[[:space:]]*Paul-Brandenburg-LLC/llc-workflow-templates/\.github/workflows/[A-Za-z0-9._-]+\.ya?ml@v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$'; then
-                      command rm -f "$addf" "$rmf"; echo false; return
-                    fi
-                    body=${line:1}
-                    major=$(printf '%s' "$body" | sed -E 's/.*@v([0-9]+)\.[0-9]+\.[0-9]+[[:space:]]*$/\1/')
-                    key=$(printf '%s' "$body" | sed -E 's/@v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$//')
-                    case "$line" in
-                      '+'*) printf '%s\t%s\n' "$key" "$major" >> "$addf" ;;
-                      '-'*) printf '%s\t%s\n' "$key" "$major" >> "$rmf"  ;;
-                    esac
-                    ;;
-                  *) : ;;
-                esac
-              done <<< "$patch"
-              i=$((i + 1))
-            done
-            # (e) mind. je eine +/- Zeile; (c)+(d) Multiset (key,major): added == removed
-            if [ -s "$addf" ] && [ -s "$rmf" ] && diff <(sort "$addf") <(sort "$rmf") >/dev/null; then
-              command rm -f "$addf" "$rmf"; echo true
-            else
-              command rm -f "$addf" "$rmf"; echo false
-            fi
-          }
+          # Definition kommt aus der geteilten Lib, die der Step "Resolve PR HEAD"
+          # nach $RUNNER_TEMP schreibt (BYTE-IDENTISCH zu scripts/gate-2-doc-only-
+          # selftest.sh; seit v1.8.0 nutzt auch das bot-exempt-Klassen-Gate sie).
+          # shellcheck disable=SC1091
+          source "$RUNNER_TEMP/gate2-lib.sh"
 
           FILES=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json files --jq '.files[].path')
           DOC_ONLY=1

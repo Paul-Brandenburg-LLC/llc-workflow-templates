@@ -6,34 +6,92 @@
 # exit != 0 bei jeder fehlgeschlagenen Assertion → CI-Gate 'checks' schlaegt fehl.
 set -uo pipefail
 
+# --- IDENTISCH zur geteilten Lib in gate-2-codex.yml ($RUNNER_TEMP/gate2-lib.sh,
+# BYTE-IDENTISCH auch zu scripts/gate-2-doc-only-selftest.sh) --------------------
+is_pin_bump() {
+  local JSON nfiles bad i patch line body key major addf rmf
+  JSON="$(cat)"
+  nfiles=$(printf '%s' "$JSON" | jq 'length')
+  case "$nfiles" in ''|*[!0-9]*) echo false; return;; esac
+  [ "$nfiles" -gt 0 ] || { echo false; return; }
+  # (a) jede geaenderte Datei ist ein Workflow-File
+  bad=$(printf '%s' "$JSON" | jq -r '[.[] | select((.filename|test("^\\.github/workflows/[^/]+\\.ya?ml$"))|not)] | length')
+  [ "$bad" = "0" ] || { echo false; return; }
+  addf="$(mktemp)"; rmf="$(mktemp)"
+  i=0
+  while [ "$i" -lt "$nfiles" ]; do
+    patch=$(printf '%s' "$JSON" | jq -r ".[$i].patch // \"\"")
+    while IFS= read -r line; do
+      case "$line" in
+        '+++'*|'---'*|'@@'*|' '*|'') : ;;
+        '+'*|'-'*)
+          # (b) jede +/- Zeile MUSS eine Org-Reusable-uses-Zeile mit Semver-Tag sein
+          if ! printf '%s\n' "$line" | grep -qE '^[-+][[:space:]]*uses:[[:space:]]*Paul-Brandenburg-LLC/llc-workflow-templates/\.github/workflows/[A-Za-z0-9._-]+\.ya?ml@v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$'; then
+            command rm -f "$addf" "$rmf"; echo false; return
+          fi
+          body=${line:1}
+          major=$(printf '%s' "$body" | sed -E 's/.*@v([0-9]+)\.[0-9]+\.[0-9]+[[:space:]]*$/\1/')
+          key=$(printf '%s' "$body" | sed -E 's/@v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$//')
+          case "$line" in
+            '+'*) printf '%s\t%s\n' "$key" "$major" >> "$addf" ;;
+            '-'*) printf '%s\t%s\n' "$key" "$major" >> "$rmf"  ;;
+          esac
+          ;;
+        *) : ;;
+      esac
+    done <<< "$patch"
+    i=$((i + 1))
+  done
+  # (e) mind. je eine +/- Zeile; (c)+(d) Multiset (key,major): added == removed
+  if [ -s "$addf" ] && [ -s "$rmf" ] && diff <(sort "$addf") <(sort "$rmf") >/dev/null; then
+    command rm -f "$addf" "$rmf"; echo true
+  else
+    command rm -f "$addf" "$rmf"; echo false
+  fi
+}
+
 # --- IDENTISCH zur Inline-Logik in gate-2-codex.yml (Step "Resolve PR HEAD") --
-# Im Workflow laedt alle_dateien_unter() die Diff-Dateien lazy via gh api;
-# hier ist FILES_JSON vor dem Aufruf gesetzt, der gh-Zweig bleibt unbetreten.
-alle_dateien_unter() {  # $1=Pfad-Regex; true, wenn der Diff >0 Dateien hat und JEDE matcht
-  local n bad
+# Im Workflow laedt lade_diff() die Diff-Dateien lazy via gh api; hier ist
+# FILES_JSON vor jedem Aufruf gesetzt, der gh-Zweig bleibt unbetreten.
+lade_diff() {  # fuellt FILES_JSON (alle Diff-Dateien inkl. .patch) genau einmal
   if [ -z "${FILES_JSON:-}" ]; then
     FILES_JSON=$(gh api --paginate "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" | jq -s '(add // [])')
   fi
+}
+alle_dateien_unter() {  # $1=Pfad-Regex; true, wenn der Diff >0 Dateien hat und JEDE matcht
+  local n bad
+  lade_diff
   n=$(printf '%s' "$FILES_JSON" | jq 'length')
   case "$n" in ''|*[!0-9]*) return 1 ;; esac
   [ "$n" -gt 0 ] || return 1
   bad=$(printf '%s' "$FILES_JSON" | jq -r --arg re "$1" '[.[] | select((.filename|test($re))|not)] | length')
   [ "$bad" = "0" ]
 }
+patch_zeilen_nur() {  # $1=Zeilen-Regex; true, wenn es +/- Patchzeilen gibt und JEDE matcht
+  local lines
+  lade_diff
+  lines=$(printf '%s' "$FILES_JSON" | jq -r '.[].patch // ""' | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' || true)
+  [ -n "$lines" ] || return 1
+  ! printf '%s\n' "$lines" | grep -qvE "$1"
+}
 
-# Eingabe: $1=AUTHOR $2=BRANCH $3=TITLE; FILES_JSON als env-Variable (JSON-Array
-# von Objekten mit .filename). Ausgabe: echo true|false.
+# Eingabe: $1=AUTHOR $2=BRANCH $3=TITLE; FILES_JSON als globale Variable (JSON-
+# Array von Objekten mit .filename/.patch). Ausgabe: echo true|false.
 klassifiziere() {
   local AUTHOR="$1" BRANCH="$2" TITLE="$3" BOT_EXEMPT=false
   case "$AUTHOR" in
     'dependabot[bot]')
+      # (1) Dependabot arbeitet ausschliesslich auf eigenen Branches.
       case "$BRANCH" in dependabot/*) BOT_EXEMPT=true ;; esac ;;
     'pb-llc-auto-fix-bot[bot]')
       if printf '%s\n' "$BRANCH" | grep -qE '^chore/pin-bump-[A-Za-z0-9._-]+-v[0-9]+\.[0-9]+\.[0-9]+$' \
          && printf '%s\n' "$TITLE" | grep -qiE 'pin|bump'; then
-        BOT_EXEMPT=true
+        lade_diff
+        [ "$(printf '%s' "$FILES_JSON" | is_pin_bump)" = "true" ] && BOT_EXEMPT=true
       elif [ "$BRANCH" = "chore/plugin-pin-bump" ] \
-         && printf '%s\n' "$TITLE" | grep -qE '^chore\(plugin\): bump pin to v[0-9]+\.[0-9]+\.[0-9]+$'; then
+         && printf '%s\n' "$TITLE" | grep -qE '^chore\(plugin\): bump pin to v[0-9]+\.[0-9]+\.[0-9]+$' \
+         && alle_dateien_unter '^CLAUDE\.md$' \
+         && patch_zeilen_nur '^[+-]plugin_version: "[0-9]+\.[0-9]+\.[0-9]+"$'; then
         BOT_EXEMPT=true
       elif printf '%s\n' "$BRANCH" | grep -qE '^bot/publish-specs-[0-9]+$' \
          && alle_dateien_unter '^llc-checkliste-deploy/specs/'; then
@@ -49,6 +107,9 @@ klassifiziere() {
 dateien() { # args: Pfade → setzt FILES_JSON auf ein Array aus {filename}-Objekten
   FILES_JSON=$(printf '%s\n' "$@" | jq -R '{filename:.}' | jq -s '.')
 }
+datei_mit_patch() { # $1=Pfad $2=Patch → setzt FILES_JSON auf [{filename,patch}]
+  FILES_JSON=$(jq -n --arg f "$1" --arg p "$2" '[{filename:$f, patch:$p}]')
+}
 
 PASS=0; FAIL=0
 check() { # $1=name $2=expected $3=actual
@@ -60,6 +121,7 @@ check() { # $1=name $2=expected $3=actual
 }
 
 BOT='pb-llc-auto-fix-bot[bot]'
+USESLINE='    uses: Paul-Brandenburg-LLC/llc-workflow-templates/.github/workflows'
 echo "=== gate-2 bot-exempt Klassen-Gate (v1.8.0) ==="
 
 # K1) Dependabot auf eigenem Branch → exempt
@@ -69,17 +131,41 @@ V=$(klassifiziere 'dependabot[bot]' 'dependabot/npm_and_yarn/lodash-4.17.21' 'ch
 # K2) Dependabot-Autor auf fremdem Branch → KEIN exempt (Autor allein reicht nicht mehr)
 V=$(klassifiziere 'dependabot[bot]' 'feature/anything' 'chore(deps): bump lodash'); check "dependabot-foreign-branch→blocks" false "$V"
 
-# K3) Workflow-Pin-Welle (propagate-templates: chore/pin-bump-<tpl>-vX.Y.Z) → exempt
-V=$(klassifiziere "$BOT" 'chore/pin-bump-gate-2-codex-v1.8.0' 'chore(ci): bump gate-2-codex pin to v1.8.0'); check "workflow-pin-bump" true "$V"
+# K3) Workflow-Pin-Welle: Branch + Titel + Diff ist reiner Tag-Bump → exempt
+P=$(printf '@@ -1,3 +1,3 @@ jobs:\n bridge:\n-%s/gate-2-codex.yml@v1.7.1\n+%s/gate-2-codex.yml@v1.8.0\n   secrets: inherit\n' "$USESLINE" "$USESLINE")
+datei_mit_patch '.github/workflows/gate-2-codex.yml' "$P"
+V=$(klassifiziere "$BOT" 'chore/pin-bump-gate-2-codex-v1.8.0' 'chore(ci): bump gate-2-codex pin to v1.8.0'); check "workflow-pin-bump-clean-diff" true "$V"
+
+# K3b) Pin-Bump-Branch, aber Diff traegt echten Workflow-Code → KEIN exempt (P1-Fix Runde 1)
+P=$(printf '@@ -1,3 +1,3 @@\n-%s/gate-2-codex.yml@v1.7.1\n+%s/gate-2-codex.yml@v1.8.0\n-  timeout-minutes: 5\n+  timeout-minutes: 60\n' "$USESLINE" "$USESLINE")
+datei_mit_patch '.github/workflows/gate-2-codex.yml' "$P"
+V=$(klassifiziere "$BOT" 'chore/pin-bump-gate-2-codex-v1.8.0' 'chore(ci): bump gate-2-codex pin to v1.8.0'); check "workflow-pin-bump-code-smuggle→blocks" false "$V"
+
+# K3c) Pin-Bump-Branch, Diff-Datei ausserhalb .github/workflows/ → KEIN exempt
+dateien 'deploy/hook.sh'
+V=$(klassifiziere "$BOT" 'chore/pin-bump-gate-2-codex-v1.8.0' 'chore(ci): bump gate-2-codex pin to v1.8.0'); check "workflow-pin-bump-foreign-file→blocks" false "$V"
 
 # K4) auto-sync-Branch (echter Workflow-Diff) → KEIN exempt
+FILES_JSON='[]'
 V=$(klassifiziere "$BOT" 'chore/auto-sync-gate-2-codex-v1.8.0' 'chore(ci): sync gate-2-codex to v1.8.0'); check "auto-sync→blocks" false "$V"
 
 # K5) seed-Branch (neuer Caller) → KEIN exempt
 V=$(klassifiziere "$BOT" 'chore/seed-gate-2-codex-caller-v1.8.0' 'chore(ci): seed gate-2-codex caller'); check "seed-caller→blocks" false "$V"
 
-# K6) Plugin-Pin-Welle: fester Branch + exakte Titelform → exempt
-V=$(klassifiziere "$BOT" 'chore/plugin-pin-bump' 'chore(plugin): bump pin to v1.35.0'); check "plugin-pin-bump" true "$V"
+# K6) Plugin-Pin-Welle: Branch + Titel + Diff nur plugin_version in CLAUDE.md → exempt
+# (Patch-Form gemessen an freiestimme-net-site#124)
+P=$(printf '@@ -1,7 +1,7 @@\n ---\n standard_version: "7.5.0"\n-plugin_version: "1.34.0"\n+plugin_version: "1.35.0"\n prepush_stack: "static"\n')
+datei_mit_patch 'CLAUDE.md' "$P"
+V=$(klassifiziere "$BOT" 'chore/plugin-pin-bump' 'chore(plugin): bump pin to v1.35.0'); check "plugin-pin-bump-clean-diff" true "$V"
+
+# K6b) Plugin-Pin-Branch, Patch dreht MEHR als die plugin_version-Zeile → KEIN exempt
+P=$(printf '@@ -1,7 +1,7 @@\n ---\n-plugin_version: "1.34.0"\n+plugin_version: "1.35.0"\n-tier: 3\n+tier: 0\n')
+datei_mit_patch 'CLAUDE.md' "$P"
+V=$(klassifiziere "$BOT" 'chore/plugin-pin-bump' 'chore(plugin): bump pin to v1.35.0'); check "plugin-pin-extra-lines→blocks" false "$V"
+
+# K6c) Plugin-Pin-Branch mit zweiter Datei im Diff → KEIN exempt
+FILES_JSON=$(jq -n '[{filename:"CLAUDE.md", patch:"@@ -1,2 +1,2 @@\n-plugin_version: \"1.34.0\"\n+plugin_version: \"1.35.0\""},{filename:"src/app.js", patch:""}]')
+V=$(klassifiziere "$BOT" 'chore/plugin-pin-bump' 'chore(plugin): bump pin to v1.35.0'); check "plugin-pin-second-file→blocks" false "$V"
 
 # K7) Plugin-Pin-Branch mit abweichendem Titel → KEIN exempt (Titel-Gegenprobe)
 V=$(klassifiziere "$BOT" 'chore/plugin-pin-bump' 'fix: irgendwas anderes'); check "plugin-pin-wrong-title→blocks" false "$V"
