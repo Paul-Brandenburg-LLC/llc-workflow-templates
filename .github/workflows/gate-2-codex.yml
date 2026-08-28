@@ -301,7 +301,10 @@ jobs:
             SKIP=true; REASON="Doc-only skip"
           else
             PATCHES=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --paginate | jq -s '(add // [])')
-            if [ "$(printf '%s' "$PATCHES" | is_pin_bump)" = "true" ]; then
+            # Fail-closed (P1 Runde 5): Dateien ohne .patch (binaer/zu gross) sind
+            # unpruefbar und duerfen den Pin-Bump-Skip nicht passieren.
+            OHNE_PATCH=$(printf '%s' "$PATCHES" | jq -r '[.[] | select((.patch // "") == "")] | length')
+            if [ "$OHNE_PATCH" = "0" ] && [ "$(printf '%s' "$PATCHES" | is_pin_bump)" = "true" ]; then
               SKIP=true; REASON="pin-bump-skip (§3.4 v7.0.5)"
             fi
           fi
