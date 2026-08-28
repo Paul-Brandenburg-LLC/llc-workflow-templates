@@ -161,8 +161,8 @@ mkdir -p "$REPO/.github/workflows" "$REPO/scripts" "$REPO/tests"
 touch "$REPO/AGENTS.md" "$REPO/.github/workflows/gate-2-codex.yml" "$REPO/scripts/x.sh"
 zweia() { ( cd "$REPO" && KONFIG_JSON="$1" bash "$AKTION/pruefung-2a.sh" >/dev/null 2>&1 ); echo $?; }
 
-JSON_FALSE='{"tier":1,"frontmatter":{"healthz_queue_threshold_s":"5","b2c_funnel":false,"visual_regression_paths":["tests/"],"critical_paths":["scripts/"],"customer":false}}'
-JSON_FEHLT='{"tier":1,"frontmatter":{"healthz_queue_threshold_s":"5","visual_regression_paths":["tests/"],"critical_paths":["scripts/"],"customer":false}}'
+JSON_FALSE='{"tier":1,"frontmatter":{"healthz_queue_threshold_s":5,"b2c_funnel":false,"visual_regression_paths":["tests/"],"critical_paths":["scripts/"],"customer":false}}'
+JSON_FEHLT='{"tier":1,"frontmatter":{"healthz_queue_threshold_s":5,"visual_regression_paths":["tests/"],"critical_paths":["scripts/"],"customer":false}}'
 JSON_T4_FALSE='{"tier":4,"frontmatter":{"customer":false}}'
 
 [ "$(zweia "$JSON_FALSE")" -eq 0 ] \
@@ -184,6 +184,28 @@ JSON_T4_FALSE='{"tier":4,"frontmatter":{"customer":false}}'
 [ "$(zweia '{"tier":2,"frontmatter":{"critical_paths":["gibtsnicht/**"],"customer":false}}')" -ne 0 ] \
   && ok "M-Q-4c (Gegenprobe): ein critical_paths-Glob ohne Treffer blockt weiterhin" \
   || fail "M-Q-4c: 2a-(vii) greift nicht mehr"
+
+# v7.7.0 Typ-Staffelung (M-TF-1…5): Hard nur, wo der Bestand typrein ist und
+# ein Typfehler eine Pruefung still umgeht; Warnstufe darf NIE blocken —
+# sonst macht der Bump gemessene Bestandsrepos rot.
+[ "$(zweia '{"tier":2,"frontmatter":{"critical_paths":false,"customer":false}}')" -ne 0 ] \
+  && ok "M-TF-1: 'critical_paths: false' blockt — der has()-Freibrief ist zu" \
+  || fail "M-TF-1: ein Nicht-Listen-Wert gilt weiter als vorhanden und umgeht die Glob-Pruefung still"
+[ "$(zweia '{"tier":2,"frontmatter":{"critical_paths":[],"customer":false}}')" -eq 0 ] \
+  && ok "M-TF-2 (Gegenprobe): eine leere Liste laeuft gruen mit Warnung (14 Bestandsrepos)" \
+  || fail "M-TF-2: die leere Liste blockt — der Bump macht Bestandsrepos rot"
+[ "$(zweia '{"tier":4,"frontmatter":{"customer":true}}')" -eq 0 ] \
+  && ok "M-TF-3: 'customer: true' warnt nur (Enum-Migration ausstehend), blockt nicht" \
+  || fail "M-TF-3: die customer-Warnstufe blockt"
+[ "$(zweia '{"tier":4,"frontmatter":{"customer":"B2C-public"}}')" -eq 0 ] \
+  && ok "M-TF-3b (Gegenprobe): ein §8.4.7-Enum-String laeuft gruen" \
+  || fail "M-TF-3b: ein gueltiger Enum-Wert blockt"
+[ "$(zweia '{"tier":1,"frontmatter":{"healthz_queue_threshold_s":"abc","b2c_funnel":false,"visual_regression_paths":["tests/"],"critical_paths":["scripts/"],"customer":false}}')" -ne 0 ] \
+  && ok "M-TF-4: ein Nicht-Zahl-Threshold blockt" \
+  || fail "M-TF-4: der Threshold-Typ wird nicht geprueft"
+[ "$(zweia '{"tier":1,"frontmatter":{"healthz_queue_threshold_s":5,"b2c_funnel":"nein","visual_regression_paths":["tests/"],"critical_paths":["scripts/"],"customer":false}}')" -eq 0 ] \
+  && ok "M-TF-5: ein String-b2c_funnel warnt nur (zwei Bestandsrepos), blockt nicht" \
+  || fail "M-TF-5: die b2c_funnel-Warnstufe blockt"
 
 # ---------------------------------------------------------------------------
 # C) Statischer Waechter ueber die Klasse
