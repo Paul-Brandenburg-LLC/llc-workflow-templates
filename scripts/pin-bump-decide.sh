@@ -16,11 +16,24 @@
 #   - vX.Y.Z < TARGET (gleicher Major) -> pinbump
 #   - vX.Y.Z >= TARGET                 -> skip
 #   - sonst           -> skip     (unbekanntes Pin-Format)
+#
+# Ausnahme pre-pr-quartett.yml (v7.6.1, llc-ops-backlog#1096): diese Datei ist
+# KEIN Reusable-Workflow-Caller, sondern ein eigener Job, der eine Composite
+# Action aufruft (`.github/actions/pre-pr-quartett@REF`). Fuer sie gibt es
+# `migrate` NICHT — der Migrate-Zweig in propagate-templates.yml rendert einen
+# Gate-2-Codex-Wrapper, der sie in jedem Consumer ueberschreiben wuerde. Ein
+# leerer PINNED_REF heisst hier deshalb `skip`, nicht `migrate`; fehlt die Datei
+# ganz, greift vorher der create-Zweig (create-if-missing).
 pin_bump_decide() {
   # shellcheck disable=SC2034  # DECISION_MODE/DECISION_REASON = Rueckgabe-Globals fuer den Aufrufer
-  local pinned="$2" tag="$3"
+  local template="$1" pinned="$2" tag="$3"
 
   if [ -z "$pinned" ]; then
+    if [ "$template" = "pre-pr-quartett.yml" ]; then
+      DECISION_MODE="skip"
+      DECISION_REASON="pre-pr-quartett.yml ohne erkennbaren Action-Pin -- KEIN migrate (der Migrate-Wrapper wuerde sie mit einem Gate-2-Codex-Caller ueberschreiben)"
+      return 0
+    fi
     DECISION_MODE="migrate"; DECISION_REASON="statische Datei -> reusable@$tag"; return 0
   fi
   if [ "$pinned" = "$tag" ]; then

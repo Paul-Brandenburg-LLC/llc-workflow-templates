@@ -7,7 +7,9 @@ inputs:
     description: 'Repository name (owner/repo)'
     required: true
   tier:
-    description: 'Repo-Tier (1|2|3|4|auto). Bei "auto" wird aus CLAUDE.md gelesen.'
+    description: >-
+      Repo-Tier (1|2|3|4|auto). Bei "auto" wird es aus der CLAUDE.md gelesen und gegen den
+      Ziel-Branch geprueft — eine Herabstufung wird abgelehnt (§3.b.2 S-2, v7.6.1).
     required: false
     default: 'auto'
 
@@ -23,102 +25,23 @@ runs:
         sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_amd64
         sudo chmod +x /usr/local/bin/yq
 
-    - name: Read CLAUDE.md frontmatter
+    # §3.b.2 S-1 + S-2 (v7.6.1, llc-ops-backlog#1096): fehlende CLAUDE.md,
+    # fehlende Frontmatter und ein tier ausserhalb 1-4 sind ABBRUCH, nicht
+    # mehr stilles Ueberspringen mit Erfolgsmeldung; bei tier=auto wird jede
+    # Herabstufung gegen den Ziel-Branch abgelehnt. Die geprueften Werte
+    # gehen als EIN JSON an die Folgeschritte (KONFIG_JSON) — ein zweites
+    # Lesen der Frontmatter gibt es bewusst nicht.
+    - name: Konfiguration lesen und hart pruefen
       id: frontmatter
       shell: bash
-      run: |
-        set -euo pipefail
-        if [ ! -f CLAUDE.md ]; then
-          echo "::warning::CLAUDE.md fehlt — Pre-PR-Quartett kann nicht voll laufen"
-          echo "tier=0" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-        # Extract YAML frontmatter (between first two --- markers); fallback to empty if absent.
-        FM=$(awk '/^---$/{n++; next} n==1{print} n==2{exit}' CLAUDE.md)
-        if [ -z "$FM" ]; then
-          echo "::notice::CLAUDE.md hat keine YAML-Frontmatter — Tier=0 (Skip)"
-          echo "tier=0" >> "$GITHUB_OUTPUT"
-          echo "standard_version=" >> "$GITHUB_OUTPUT"
-          echo "plugin_version=" >> "$GITHUB_OUTPUT"
-          echo "prepush_stack=node" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-        TIER=$(printf '%s' "$FM" | yq -r '.tier // 0' 2>/dev/null || echo 0)
-        STANDARD_VERSION=$(printf '%s' "$FM" | yq -r '.standard_version // ""' 2>/dev/null || echo "")
-        PLUGIN_VERSION=$(printf '%s' "$FM" | yq -r '.plugin_version // ""' 2>/dev/null || echo "")
-        PREPUSH_STACK=$(printf '%s' "$FM" | yq -r '.prepush_stack // "node"' 2>/dev/null || echo "node")
-        # Sanitize: strip newlines / take first line only
-        TIER=$(printf '%s' "$TIER" | head -1 | tr -d '\r')
-        STANDARD_VERSION=$(printf '%s' "$STANDARD_VERSION" | head -1 | tr -d '\r')
-        PLUGIN_VERSION=$(printf '%s' "$PLUGIN_VERSION" | head -1 | tr -d '\r')
-        PREPUSH_STACK=$(printf '%s' "$PREPUSH_STACK" | head -1 | tr -d '\r')
-        echo "tier=$TIER" >> "$GITHUB_OUTPUT"
-        echo "standard_version=$STANDARD_VERSION" >> "$GITHUB_OUTPUT"
-        echo "plugin_version=$PLUGIN_VERSION" >> "$GITHUB_OUTPUT"
-        echo "prepush_stack=$PREPUSH_STACK" >> "$GITHUB_OUTPUT"
-        echo "tier=$TIER, standard=$STANDARD_VERSION, plugin=$PLUGIN_VERSION, stack=$PREPUSH_STACK"
-
-    - name: 2a Repo-Konfig-Konformität
-      shell: bash
       env:
-        TIER: ${{ steps.frontmatter.outputs.tier }}
-      run: |
-        set -euo pipefail
-        # If Tier=0 (no frontmatter or skip), skip this step entirely
-        if [ "${TIER:-0}" = "0" ]; then
-          echo "::notice::2a übersprungen (Tier=0)"
-          exit 0
-        fi
-        # Extract YAML frontmatter from CLAUDE.md (between first two --- markers)
-        FM=$(awk '/^---$/{n++; next} n==1{print} n==2{exit}' CLAUDE.md)
-        if [ -z "$FM" ]; then
-          echo "::notice::2a übersprungen (keine Frontmatter)"
-          exit 0
-        fi
-        ERRORS=""
-        add_err() { ERRORS+="$1"$'\n'; }
-        # 2a-(i) AGENTS.md
-        [ ! -f "AGENTS.md" ] && add_err "2a-(i): AGENTS.md fehlt"
-        # 2a-(ii) gate-2-codex.yml
-        [ ! -f ".github/workflows/gate-2-codex.yml" ] && add_err "2a-(ii): .github/workflows/gate-2-codex.yml fehlt"
-        # 2a-(vi) Tier-Pflichtfelder
-        case "$TIER" in
-          1)
-            for k in healthz_queue_threshold_s b2c_funnel visual_regression_paths critical_paths customer; do
-              VAL=$(printf '%s' "$FM" | yq -r ".$k // \"\"" 2>/dev/null || echo "")
-              if [ -z "$VAL" ] || [ "$VAL" = "null" ]; then add_err "2a-(vi): Tier-1 Pflichtfeld '$k' fehlt"; fi
-            done
-            ;;
-          2)
-            for k in critical_paths customer; do
-              VAL=$(printf '%s' "$FM" | yq -r ".$k // \"\"" 2>/dev/null || echo "")
-              if [ -z "$VAL" ] || [ "$VAL" = "null" ]; then add_err "2a-(vi): Tier-2 Pflichtfeld '$k' fehlt"; fi
-            done
-            ;;
-          3|4)
-            VAL=$(printf '%s' "$FM" | yq -r ".customer // \"\"" 2>/dev/null || echo "")
-            if [ -z "$VAL" ] || [ "$VAL" = "null" ]; then add_err "2a-(vi): Tier-$TIER Pflichtfeld 'customer' fehlt"; fi
-            ;;
-        esac
-        # 2a-(vii) critical_paths-Glob-Existenz
-        CP_LIST=$(printf '%s' "$FM" | yq -r '.critical_paths[]? // empty' 2>/dev/null || echo "")
-        if [ -n "$CP_LIST" ]; then
-          while IFS= read -r glob; do
-            [ -z "$glob" ] && continue
-            shopt -s nullglob globstar 2>/dev/null
-            matches=( $glob )
-            shopt -u nullglob globstar 2>/dev/null
-            if [ ${#matches[@]} -eq 0 ] && [ ! -e "$glob" ]; then
-              add_err "2a-(vii): critical_paths-Glob '$glob' matcht keine Datei"
-            fi
-          done <<< "$CP_LIST"
-        fi
-        if [ -n "$ERRORS" ]; then
-          echo "::error::Pre-PR-Quartett 2a BLOCK:"
-          printf '%s' "$ERRORS"
-          exit 1
-        fi
-        echo "✓ 2a Repo-Konfig-Konformität"
+        TIER_EINGABE: ${{ inputs.tier }}
+        BASIS_SHA: ${{ github.event.pull_request.base.sha }}
+      run: bash "$GITHUB_ACTION_PATH/konfiguration-lesen.sh"
+
+    - name: 2a Repo-Konfig-Konformitaet
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/pruefung-2a.sh"
 
     - name: 2e Workflow-Konsistenz
       shell: bash
