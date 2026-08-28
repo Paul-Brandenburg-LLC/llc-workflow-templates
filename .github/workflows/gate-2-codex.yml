@@ -161,7 +161,9 @@ jobs:
             n=$(printf '%s' "$FILES_JSON" | jq 'length')
             case "$n" in ''|*[!0-9]*) return 1 ;; esac
             [ "$n" -gt 0 ] || return 1
-            bad=$(printf '%s' "$FILES_JSON" | jq -r --arg re "$1" '[.[] | select((.filename|test($re))|not)] | length')
+            # Renames (P1 Runde 3): auch der ALTE Pfad muss die Grenze einhalten —
+            # sonst schoebe ein status:renamed z.B. einen Workflow nach tasks/.
+            bad=$(printf '%s' "$FILES_JSON" | jq -r --arg re "$1" '[.[] | select( ((.filename|test($re))|not) or (((.previous_filename // .filename)|test($re))|not) )] | length')
             [ "$bad" = "0" ]
           }
           patch_zeilen_nur() {  # $1=Zeilen-Regex; true, wenn es +/- Patchzeilen gibt und JEDE matcht

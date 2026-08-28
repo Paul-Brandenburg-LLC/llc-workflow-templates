@@ -83,7 +83,9 @@ alle_dateien_unter() {  # $1=Pfad-Regex; true, wenn der Diff >0 Dateien hat und 
   n=$(printf '%s' "$FILES_JSON" | jq 'length')
   case "$n" in ''|*[!0-9]*) return 1 ;; esac
   [ "$n" -gt 0 ] || return 1
-  bad=$(printf '%s' "$FILES_JSON" | jq -r --arg re "$1" '[.[] | select((.filename|test($re))|not)] | length')
+  # Renames (P1 Runde 3): auch der ALTE Pfad muss die Grenze einhalten —
+  # sonst schoebe ein status:renamed z.B. einen Workflow nach tasks/.
+  bad=$(printf '%s' "$FILES_JSON" | jq -r --arg re "$1" '[.[] | select( ((.filename|test($re))|not) or (((.previous_filename // .filename)|test($re))|not) )] | length')
   [ "$bad" = "0" ]
 }
 patch_zeilen_nur() {  # $1=Zeilen-Regex; true, wenn es +/- Patchzeilen gibt und JEDE matcht
@@ -215,6 +217,14 @@ V=$(klassifiziere "$BOT" 'bot/publish-specs-33158225929' 'docs(specs): auto-publ
 # K11) Cloud-Dispatch: Diff NUR unter tasks/ → exempt (gemessen an llc-ops-backlog#1100/#1101)
 dateien 'tasks/0016-service-worker-fuer-offline-cache.yml' 'tasks/0568-gitleaks-allowlists-bekannte-fps.yml'
 V=$(klassifiziere "$BOT" 'chore/cloud-dispatch-20260828-114758' 'chore(cloud-dispatch): 2 Task(s) dispatcht'); check "cloud-dispatch-clean" true "$V"
+
+# K11b) Cloud-Dispatch: Rename VON ausserhalb nach tasks/ → KEIN exempt (P1 Runde 3)
+FILES_JSON=$(jq -n '[{filename:"tasks/deploy.yml", previous_filename:".github/workflows/deploy.yml", status:"renamed"}]')
+V=$(klassifiziere "$BOT" 'chore/cloud-dispatch-20260828-114758' 'chore(cloud-dispatch): 1 Task(s) dispatcht'); check "cloud-dispatch-rename-smuggle→blocks" false "$V"
+
+# K11c) Spec-Publish: Rename INNERHALB specs/ bleibt erlaubt (Grenze haelt beidseitig)
+FILES_JSON=$(jq -n '[{filename:"llc-checkliste-deploy/specs/NEU.html", previous_filename:"llc-checkliste-deploy/specs/ALT.html", status:"renamed"}]')
+V=$(klassifiziere "$BOT" 'bot/publish-specs-33158225929' 'docs(specs): auto-publish'); check "publish-specs-rename-within" true "$V"
 
 # K12) Cloud-Dispatch mit Workflow-Datei im Diff → KEIN exempt
 dateien 'tasks/0999-x.yml' '.github/workflows/deploy.yml'
