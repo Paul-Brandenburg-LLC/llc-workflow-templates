@@ -132,9 +132,28 @@ jobs:
           source "$RUNNER_TEMP/gate2-lib.sh"
 
           lade_diff() {  # fuellt FILES_JSON (alle Diff-Dateien inkl. .patch) genau einmal
+            local erwartet geladen
             if [ -z "${FILES_JSON:-}" ]; then
               FILES_JSON=$(gh api --paginate "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" | jq -s '(add // [])')
+              # Fail-closed (P1 Runde 2): der files-Endpunkt liefert hoechstens 3000
+              # Eintraege — stimmt die Zahl nicht mit changed_files des PR ueberein,
+              # ist der Diff unvollstaendig und darf NIE eine Exempt-Klasse belegen
+              # (leeres Array laesst jede Diff-Pruefung scheitern).
+              erwartet=$(printf '%s' "$PRJSON" | jq -r '.changed_files // -1')
+              geladen=$(printf '%s' "$FILES_JSON" | jq 'length')
+              if [ "$geladen" != "$erwartet" ]; then FILES_JSON='[]'; fi
             fi
+          }
+          alle_patches_vorhanden() {  # true, wenn der Diff >0 Dateien hat und JEDE einen Patch traegt
+            local n ohne
+            lade_diff
+            n=$(printf '%s' "$FILES_JSON" | jq 'length')
+            case "$n" in ''|*[!0-9]*) return 1 ;; esac
+            [ "$n" -gt 0 ] || return 1
+            # Fail-closed (P1 Runde 2): binaere oder zu grosse Dateien haben kein
+            # .patch-Feld — ihr Inhalt ist unpruefbar, also keine Exempt-Klasse.
+            ohne=$(printf '%s' "$FILES_JSON" | jq -r '[.[] | select((.patch // "") == "")] | length')
+            [ "$ohne" = "0" ]
           }
           alle_dateien_unter() {  # $1=Pfad-Regex; true, wenn der Diff >0 Dateien hat und JEDE matcht
             local n bad
@@ -163,12 +182,16 @@ jobs:
                  && printf '%s\n' "$TITLE" | grep -qiE 'pin|bump'; then
                 # (2a) Workflow-Pin-Welle (propagate-templates.yml; seed-/auto-sync-
                 #      Branches fallen BEWUSST durch — sie tragen echte Workflow-Diffs).
-                #      Diff-Gegenprobe: der GESAMTE Patch muss ein reiner Tag-Bump sein.
-                lade_diff
-                [ "$(printf '%s' "$FILES_JSON" | is_pin_bump)" = "true" ] && BOT_EXEMPT=true
+                #      Diff-Gegenprobe: der GESAMTE Patch muss ein reiner Tag-Bump sein;
+                #      alle Dateien muessen einen pruefbaren Patch tragen (fail-closed).
+                if alle_patches_vorhanden \
+                   && [ "$(printf '%s' "$FILES_JSON" | is_pin_bump)" = "true" ]; then
+                  BOT_EXEMPT=true
+                fi
               elif [ "$BRANCH" = "chore/plugin-pin-bump" ] \
                  && printf '%s\n' "$TITLE" | grep -qE '^chore\(plugin\): bump pin to v[0-9]+\.[0-9]+\.[0-9]+$' \
                  && alle_dateien_unter '^CLAUDE\.md$' \
+                 && alle_patches_vorhanden \
                  && patch_zeilen_nur '^[+-]plugin_version: "[0-9]+\.[0-9]+\.[0-9]+"$'; then
                 # (2b) Plugin-Pin-Welle (auto-pin-bump.yml): Diff darf NUR die
                 #      plugin_version-Zeile in CLAUDE.md drehen (gemessen an

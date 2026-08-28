@@ -54,9 +54,28 @@ is_pin_bump() {
 # Im Workflow laedt lade_diff() die Diff-Dateien lazy via gh api; hier ist
 # FILES_JSON vor jedem Aufruf gesetzt, der gh-Zweig bleibt unbetreten.
 lade_diff() {  # fuellt FILES_JSON (alle Diff-Dateien inkl. .patch) genau einmal
+  local erwartet geladen
   if [ -z "${FILES_JSON:-}" ]; then
     FILES_JSON=$(gh api --paginate "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" | jq -s '(add // [])')
+    # Fail-closed (P1 Runde 2): der files-Endpunkt liefert hoechstens 3000
+    # Eintraege — stimmt die Zahl nicht mit changed_files des PR ueberein,
+    # ist der Diff unvollstaendig und darf NIE eine Exempt-Klasse belegen
+    # (leeres Array laesst jede Diff-Pruefung scheitern).
+    erwartet=$(printf '%s' "$PRJSON" | jq -r '.changed_files // -1')
+    geladen=$(printf '%s' "$FILES_JSON" | jq 'length')
+    if [ "$geladen" != "$erwartet" ]; then FILES_JSON='[]'; fi
   fi
+}
+alle_patches_vorhanden() {  # true, wenn der Diff >0 Dateien hat und JEDE einen Patch traegt
+  local n ohne
+  lade_diff
+  n=$(printf '%s' "$FILES_JSON" | jq 'length')
+  case "$n" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$n" -gt 0 ] || return 1
+  # Fail-closed (P1 Runde 2): binaere oder zu grosse Dateien haben kein
+  # .patch-Feld — ihr Inhalt ist unpruefbar, also keine Exempt-Klasse.
+  ohne=$(printf '%s' "$FILES_JSON" | jq -r '[.[] | select((.patch // "") == "")] | length')
+  [ "$ohne" = "0" ]
 }
 alle_dateien_unter() {  # $1=Pfad-Regex; true, wenn der Diff >0 Dateien hat und JEDE matcht
   local n bad
@@ -86,11 +105,14 @@ klassifiziere() {
     'pb-llc-auto-fix-bot[bot]')
       if printf '%s\n' "$BRANCH" | grep -qE '^chore/pin-bump-[A-Za-z0-9._-]+-v[0-9]+\.[0-9]+\.[0-9]+$' \
          && printf '%s\n' "$TITLE" | grep -qiE 'pin|bump'; then
-        lade_diff
-        [ "$(printf '%s' "$FILES_JSON" | is_pin_bump)" = "true" ] && BOT_EXEMPT=true
+        if alle_patches_vorhanden \
+           && [ "$(printf '%s' "$FILES_JSON" | is_pin_bump)" = "true" ]; then
+          BOT_EXEMPT=true
+        fi
       elif [ "$BRANCH" = "chore/plugin-pin-bump" ] \
          && printf '%s\n' "$TITLE" | grep -qE '^chore\(plugin\): bump pin to v[0-9]+\.[0-9]+\.[0-9]+$' \
          && alle_dateien_unter '^CLAUDE\.md$' \
+         && alle_patches_vorhanden \
          && patch_zeilen_nur '^[+-]plugin_version: "[0-9]+\.[0-9]+\.[0-9]+"$'; then
         BOT_EXEMPT=true
       elif printf '%s\n' "$BRANCH" | grep -qE '^bot/publish-specs-[0-9]+$' \
@@ -145,6 +167,10 @@ V=$(klassifiziere "$BOT" 'chore/pin-bump-gate-2-codex-v1.8.0' 'chore(ci): bump g
 dateien 'deploy/hook.sh'
 V=$(klassifiziere "$BOT" 'chore/pin-bump-gate-2-codex-v1.8.0' 'chore(ci): bump gate-2-codex pin to v1.8.0'); check "workflow-pin-bump-foreign-file→blocks" false "$V"
 
+# K3d) Pin-Bump-Branch, eine Datei OHNE Patch (binaer/zu gross) → KEIN exempt (fail-closed)
+FILES_JSON=$(jq -n --arg p "$(printf '@@ -1,2 +1,2 @@\n-%s/gate-2-codex.yml@v1.7.1\n+%s/gate-2-codex.yml@v1.8.0\n' "$USESLINE" "$USESLINE")" '[{filename:".github/workflows/gate-2-codex.yml", patch:$p},{filename:".github/workflows/blob.yml"}]')
+V=$(klassifiziere "$BOT" 'chore/pin-bump-gate-2-codex-v1.8.0' 'chore(ci): bump gate-2-codex pin to v1.8.0'); check "workflow-pin-bump-patchless-file→blocks" false "$V"
+
 # K4) auto-sync-Branch (echter Workflow-Diff) → KEIN exempt
 FILES_JSON='[]'
 V=$(klassifiziere "$BOT" 'chore/auto-sync-gate-2-codex-v1.8.0' 'chore(ci): sync gate-2-codex to v1.8.0'); check "auto-sync→blocks" false "$V"
@@ -166,6 +192,10 @@ V=$(klassifiziere "$BOT" 'chore/plugin-pin-bump' 'chore(plugin): bump pin to v1.
 # K6c) Plugin-Pin-Branch mit zweiter Datei im Diff → KEIN exempt
 FILES_JSON=$(jq -n '[{filename:"CLAUDE.md", patch:"@@ -1,2 +1,2 @@\n-plugin_version: \"1.34.0\"\n+plugin_version: \"1.35.0\""},{filename:"src/app.js", patch:""}]')
 V=$(klassifiziere "$BOT" 'chore/plugin-pin-bump' 'chore(plugin): bump pin to v1.35.0'); check "plugin-pin-second-file→blocks" false "$V"
+
+# K6d) Plugin-Pin-Branch, CLAUDE.md OHNE Patch-Feld → KEIN exempt (fail-closed)
+FILES_JSON=$(jq -n '[{filename:"CLAUDE.md"}]')
+V=$(klassifiziere "$BOT" 'chore/plugin-pin-bump' 'chore(plugin): bump pin to v1.35.0'); check "plugin-pin-patchless→blocks" false "$V"
 
 # K7) Plugin-Pin-Branch mit abweichendem Titel → KEIN exempt (Titel-Gegenprobe)
 V=$(klassifiziere "$BOT" 'chore/plugin-pin-bump' 'fix: irgendwas anderes'); check "plugin-pin-wrong-title→blocks" false "$V"
