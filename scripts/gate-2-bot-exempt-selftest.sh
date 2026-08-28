@@ -25,8 +25,10 @@ is_pin_bump() {
       case "$line" in
         '+++'*|'---'*|'@@'*|' '*|'') : ;;
         '+'*|'-'*)
-          # (b) jede +/- Zeile MUSS eine Org-Reusable-uses-Zeile mit Semver-Tag sein
-          if ! printf '%s\n' "$line" | grep -qE '^[-+][[:space:]]*uses:[[:space:]]*Paul-Brandenburg-LLC/llc-workflow-templates/\.github/workflows/[A-Za-z0-9._-]+\.ya?ml@v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$'; then
+          # (b) jede +/- Zeile MUSS eine Org-Reusable-uses-Zeile mit Semver-Tag sein:
+          #     Reusable-Workflow (workflows/<f>.yml, Job-Ebene) ODER Composite
+          #     Action (actions/<name>, Step-Ebene mit Listen-'- ') — P1 Runde 4.
+          if ! printf '%s\n' "$line" | grep -qE '^[-+][[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*Paul-Brandenburg-LLC/llc-workflow-templates/\.github/(workflows/[A-Za-z0-9._-]+\.ya?ml|actions/[A-Za-z0-9._-]+)@v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$'; then
             command rm -f "$addf" "$rmf"; echo false; return
           fi
           body=${line:1}
@@ -168,6 +170,12 @@ V=$(klassifiziere "$BOT" 'chore/pin-bump-gate-2-codex-v1.8.0' 'chore(ci): bump g
 # K3c) Pin-Bump-Branch, Diff-Datei ausserhalb .github/workflows/ → KEIN exempt
 dateien 'deploy/hook.sh'
 V=$(klassifiziere "$BOT" 'chore/pin-bump-gate-2-codex-v1.8.0' 'chore(ci): bump gate-2-codex pin to v1.8.0'); check "workflow-pin-bump-foreign-file→blocks" false "$V"
+
+# K3e) Composite-Action-Pin-Welle (pre-pr-quartett, Step-Ebene mit Listen-'- ') → exempt
+ACTLINE='      - uses: Paul-Brandenburg-LLC/llc-workflow-templates/.github/actions/pre-pr-quartett'
+P=$(printf '@@ -18,3 +18,3 @@ steps:\n-%s@v1.7.0\n+%s@v1.7.1\n' "$ACTLINE" "$ACTLINE")
+datei_mit_patch '.github/workflows/pre-pr-quartett.yml' "$P"
+V=$(klassifiziere "$BOT" 'chore/pin-bump-pre-pr-quartett-v1.7.1' 'chore(ci): bump pre-pr-quartett pin to v1.7.1'); check "composite-action-pin-bump" true "$V"
 
 # K3d) Pin-Bump-Branch, eine Datei OHNE Patch (binaer/zu gross) → KEIN exempt (fail-closed)
 FILES_JSON=$(jq -n --arg p "$(printf '@@ -1,2 +1,2 @@\n-%s/gate-2-codex.yml@v1.7.1\n+%s/gate-2-codex.yml@v1.8.0\n' "$USESLINE" "$USESLINE")" '[{filename:".github/workflows/gate-2-codex.yml", patch:$p},{filename:".github/workflows/blob.yml"}]')

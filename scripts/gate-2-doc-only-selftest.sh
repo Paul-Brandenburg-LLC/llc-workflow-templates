@@ -57,8 +57,10 @@ is_pin_bump() {
       case "$line" in
         '+++'*|'---'*|'@@'*|' '*|'') : ;;
         '+'*|'-'*)
-          # (b) jede +/- Zeile MUSS eine Org-Reusable-uses-Zeile mit Semver-Tag sein
-          if ! printf '%s\n' "$line" | grep -qE '^[-+][[:space:]]*uses:[[:space:]]*Paul-Brandenburg-LLC/llc-workflow-templates/\.github/workflows/[A-Za-z0-9._-]+\.ya?ml@v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$'; then
+          # (b) jede +/- Zeile MUSS eine Org-Reusable-uses-Zeile mit Semver-Tag sein:
+          #     Reusable-Workflow (workflows/<f>.yml, Job-Ebene) ODER Composite
+          #     Action (actions/<name>, Step-Ebene mit Listen-'- ') — P1 Runde 4.
+          if ! printf '%s\n' "$line" | grep -qE '^[-+][[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*Paul-Brandenburg-LLC/llc-workflow-templates/\.github/(workflows/[A-Za-z0-9._-]+\.ya?ml|actions/[A-Za-z0-9._-]+)@v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$'; then
             command rm -f "$addf" "$rmf"; echo false; return
           fi
           body=${line:1}
@@ -170,6 +172,11 @@ V=$(files_json '.github/workflows/gate-2-codex.yml' "$P" | is_pin_bump); check "
 # P6) uses-Ziel-Aenderung (Pfad wechselt, gleicher Tag) → KEIN SKIP
 P=$(printf '@@ -1,2 +1,2 @@\n-%s/gate-2-codex.yml@v1.5.2\n+%s/review.yml@v1.5.2\n' "$USESLINE" "$USESLINE")
 V=$(files_json '.github/workflows/gate-2-codex.yml' "$P" | is_pin_bump); check "pinbump-target-change→blocks" false "$V"
+
+# P7b) Composite-Action-Pin-Bump (Step-Ebene, '- uses: …/.github/actions/<name>@vX.Y.Z') → SKIP
+ACTLINE='      - uses: Paul-Brandenburg-LLC/llc-workflow-templates/.github/actions/pre-pr-quartett'
+P=$(printf '@@ -18,3 +18,3 @@ steps:\n-%s@v1.7.0\n+%s@v1.7.1\n' "$ACTLINE" "$ACTLINE")
+V=$(files_json '.github/workflows/pre-pr-quartett.yml' "$P" | is_pin_bump); check "pinbump-composite-action" true "$V"
 
 # P7) Nicht-Workflow-Datei (Pfad ausserhalb .github/workflows) → KEIN SKIP
 P=$(printf '@@ -1,2 +1,2 @@\n-%s/gate-2-codex.yml@v1.5.2\n+%s/gate-2-codex.yml@v1.5.3\n' "$USESLINE" "$USESLINE")

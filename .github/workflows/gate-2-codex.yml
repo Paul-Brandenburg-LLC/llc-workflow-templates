@@ -103,8 +103,10 @@ jobs:
                 case "$line" in
                   '+++'*|'---'*|'@@'*|' '*|'') : ;;
                   '+'*|'-'*)
-                    # (b) jede +/- Zeile MUSS eine Org-Reusable-uses-Zeile mit Semver-Tag sein
-                    if ! printf '%s\n' "$line" | grep -qE '^[-+][[:space:]]*uses:[[:space:]]*Paul-Brandenburg-LLC/llc-workflow-templates/\.github/workflows/[A-Za-z0-9._-]+\.ya?ml@v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$'; then
+                    # (b) jede +/- Zeile MUSS eine Org-Reusable-uses-Zeile mit Semver-Tag sein:
+                    #     Reusable-Workflow (workflows/<f>.yml, Job-Ebene) ODER Composite
+                    #     Action (actions/<name>, Step-Ebene mit Listen-'- ') — P1 Runde 4.
+                    if ! printf '%s\n' "$line" | grep -qE '^[-+][[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*Paul-Brandenburg-LLC/llc-workflow-templates/\.github/(workflows/[A-Za-z0-9._-]+\.ya?ml|actions/[A-Za-z0-9._-]+)@v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$'; then
                       command rm -f "$addf" "$rmf"; echo false; return
                     fi
                     body=${line:1}
