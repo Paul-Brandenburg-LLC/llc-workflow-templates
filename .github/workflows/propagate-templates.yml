@@ -20,10 +20,19 @@ name: Propagate Templates
 #   - migrate: statische Consumer-Datei -> Reusable-Aufruf@TAG (bisheriges Verhalten)
 #   - pinbump: bestehender exakter Reusable-Pin @vX.Y.Z < TAG (gleicher Major) -> @TAG
 #     (behebt: Exakt-Pinner bekamen Template-Fixes nie automatisch; nur @v1-Floater).
-#   - create: NUR für template=auto-pin-bump.yml — Repos, denen die Datei ganz
-#     fehlt, bekommen einen neuen Thin-Caller (create-if-missing, §3.4 v7.0.4).
+#   - create: NUR für die Templates in CREATE_IF_MISSING (auto-pin-bump.yml,
+#     pre-pr-quartett.yml) — Repos, denen die Datei ganz fehlt, bekommen einen
+#     neuen Caller (create-if-missing, §3.4 v7.0.4 / §3.b.2 v7.6.1).
 #   Skip: bereits @TAG, Floating @v1, Commit-SHA-Pin, Major-Bump (= manuell), oder
-#     fehlende Datei bei anderem Template als auto-pin-bump.yml.
+#     fehlende Datei bei einem Template ausserhalb CREATE_IF_MISSING.
+#
+# ⚠ pre-pr-quartett.yml ist ein SONDERFALL (§3.b.2 v7.6.1, llc-ops-backlog#1096):
+# sie ist kein Reusable-Workflow-Caller, sondern ein eigener Job, der die
+# Composite Action `.github/actions/pre-pr-quartett@REF` aufruft. Die
+# Pin-Erkennung muss deshalb auch den actions/-Pfad treffen, und `migrate` ist
+# fuer sie ausgeschlossen — der Migrate-Wrapper rendert einen Gate-2-Codex-Caller
+# und haette die Datei sonst in 24 Repos ueberschrieben. Beides ist in
+# scripts/pin-bump-decide.sh und scripts/pre-pr-quartett-selftest.sh festgenagelt.
 # dry_run-Input: nur erkennen + loggen, keine Branches/PRs.
 
 on:
@@ -38,7 +47,7 @@ on:
         description: 'Templates-Tag (override; sonst latest semver tag)'
         required: false
       template:
-        description: 'Welche Template-Datei propagieren (gate-2-codex.yml | cold-start-ci.yml | auto-pin-bump.yml)'
+        description: 'Welche Template-Datei propagieren (gate-2-codex.yml | cold-start-ci.yml | auto-pin-bump.yml | pre-pr-quartett.yml)'
         required: false
         default: 'gate-2-codex.yml'
       dry_run:
@@ -162,21 +171,31 @@ jobs:
           CURRENT=$(gh api "/repos/${REPO}/contents/${TARGET}" 2>/dev/null || echo '{}')
           SHA=$(echo "$CURRENT" | jq -r '.sha // empty')
           if [ -z "$SHA" ]; then
-            # Datei fehlt. create-if-missing gilt NUR für auto-pin-bump.yml
-            # (§3.4 v7.0.4) — andere Templates werden nicht flächig neu angelegt.
-            if [ "$TEMPLATE" != "auto-pin-bump.yml" ]; then
-              echo "::notice::$REPO has no $TARGET — skipping (kein create-if-missing für $TEMPLATE)"
-              exit 0
-            fi
-            echo "::notice::$REPO $TEMPLATE: mode=create (Datei fehlt → neuer Thin-Caller @$TAG)"
+            # Datei fehlt. create-if-missing gilt nur für die Templates, die
+            # flächig neu angelegt werden dürfen (§3.4 v7.0.4 auto-pin-bump.yml,
+            # §3.b.2 v7.6.1 pre-pr-quartett.yml) — alle anderen nicht.
+            case "$TEMPLATE" in
+              auto-pin-bump.yml|pre-pr-quartett.yml) : ;;
+              *)
+                echo "::notice::$REPO has no $TARGET — skipping (kein create-if-missing für $TEMPLATE)"
+                exit 0
+                ;;
+            esac
+            echo "::notice::$REPO $TEMPLATE: mode=create (Datei fehlt → neuer Caller @$TAG)"
             if [ "${DRY_RUN:-false}" = "true" ]; then
               echo "DRY-RUN: wuerde 'create' fuer $REPO/$TARGET ausfuehren (neuer Thin-Caller @$TAG) -- kein Branch/PR"
               exit 0
             fi
-            CREATE_CONTENT=$(bash "$GITHUB_WORKSPACE/scripts/render-auto-pin-bump-caller.sh" "$TAG")
+            case "$TEMPLATE" in
+              pre-pr-quartett.yml)
+                CREATE_CONTENT=$(bash "$GITHUB_WORKSPACE/scripts/render-pre-pr-quartett-caller.sh" "$TAG") ;;
+              *)
+                CREATE_CONTENT=$(bash "$GITHUB_WORKSPACE/scripts/render-auto-pin-bump-caller.sh" "$TAG") ;;
+            esac
             CREATE_B64=$(printf '%s\n' "$CREATE_CONTENT" | base64 | tr -d '\n')
-            CREATE_BRANCH="chore/seed-auto-pin-bump-caller-${TAG}"
-            CREATE_MSG=$(printf 'chore(workflows): seed auto-pin-bump Thin-Caller (@%s)\n\nPB LLC §3.4 v7.0.4 — create-if-missing via propagate-templates.yml.\nRepo reagiert danach auf repository_dispatch [plugin-bump].' "$TAG")
+            CREATE_SLUG="${TEMPLATE%.yml}"
+            CREATE_BRANCH="chore/seed-${CREATE_SLUG}-caller-${TAG}"
+            CREATE_MSG=$(printf 'chore(workflows): seed %s Caller (@%s)\n\nPB LLC §3.4 v7.0.4 / §3.b.2 v7.6.1 — create-if-missing via propagate-templates.yml.' "$CREATE_SLUG" "$TAG")
             # Branch von main (idempotent bei Re-Run).
             CREATE_MAIN_SHA=$(gh api "/repos/${REPO}/git/ref/heads/${DEFAULT_BRANCH}" --jq '.object.sha')
             gh api -X POST "/repos/${REPO}/git/refs" \
@@ -199,8 +218,8 @@ jobs:
               --repo "$REPO" \
               --base "$DEFAULT_BRANCH" \
               --head "$CREATE_BRANCH" \
-              --title "chore(workflows): seed auto-pin-bump Thin-Caller @${TAG}" \
-              --body "PB LLC §3.4 v7.0.4 — create-if-missing Seed des auto-pin-bump Thin-Callers.
+              --title "chore(workflows): seed ${CREATE_SLUG} Caller @${TAG}" \
+              --body "PB LLC §3.4 v7.0.4 / §3.b.2 v7.6.1 — create-if-missing Seed des ${CREATE_SLUG}-Callers.
 
           ## Blast-Radius
 
@@ -208,7 +227,7 @@ jobs:
           - [ ] mittel
           - [ ] groß
 
-          Neue Datei .github/workflows/auto-pin-bump.yml — Thin-Caller auf den Reusable @${TAG}. Repo reagiert danach auf repository_dispatch [plugin-bump]. Kein bestehender Code-Path berührt.
+          Neue Datei ${TARGET} — Caller auf llc-workflow-templates@${TAG}. Kein bestehender Code-Path berührt.
 
           ## Test-Plan
 
@@ -231,8 +250,14 @@ jobs:
           BODY_DECODED=$(echo "$CURRENT" | jq -r '.content // ""' | base64 -d 2>/dev/null || echo "")
 
           # 2. Extract currently pinned reusable ref (empty = static file / not yet reusable).
+          # Zwei Pin-Formen: Reusable-Workflow (.github/workflows/<datei>.yml@REF)
+          # und Composite Action (.github/actions/<name>@REF, ohne .yml). Bis
+          # v7.6.0 kannte der Ausdruck nur die erste — bei pre-pr-quartett.yml
+          # blieb PINNED_REF deshalb leer, und das hiess `migrate`: der
+          # Gate-2-Codex-Wrapper haette die Datei in jedem Consumer
+          # ueberschrieben (llc-ops-backlog#1096).
           PINNED_REF=$(printf '%s\n' "$BODY_DECODED" \
-            | grep -oE "Paul-Brandenburg-LLC/llc-workflow-templates/[.]github/workflows/${TEMPLATE}@[A-Za-z0-9._-]+" \
+            | grep -oE "Paul-Brandenburg-LLC/llc-workflow-templates/[.]github/(workflows/${TEMPLATE}|actions/${TEMPLATE%.yml})@[A-Za-z0-9._-]+" \
             | head -1 | sed 's/.*@//' || true)
 
           # 3. Decision (SSOT: scripts/pin-bump-decide.sh) → migrate | pinbump | skip.
@@ -278,7 +303,7 @@ jobs:
           if [ "$DECISION_MODE" = "pinbump" ]; then
             BRANCH="chore/pin-bump-${TEMPLATE%.yml}-${TAG}"
             NEW_CONTENT=$(printf '%s' "$BODY_DECODED" \
-              | sed -E "s#(Paul-Brandenburg-LLC/llc-workflow-templates/[.]github/workflows/${TEMPLATE})@${PINNED_REF}#\1@${TAG}#g")
+              | sed -E "s#(Paul-Brandenburg-LLC/llc-workflow-templates/[.]github/(workflows/${TEMPLATE}|actions/${TEMPLATE%.yml}))@${PINNED_REF}#\1@${TAG}#g")
             PR_TITLE="chore(workflows): pin-bump ${TEMPLATE} ${PINNED_REF} -> ${TAG}"
             PR_LEAD="Pin-Bump des bestehenden Reusable-Pins \`${PINNED_REF}\` -> \`${TAG}\` (gleicher Major, in-line). Kein Struktur-Change."
             MSG=$(printf 'chore(workflows): pin-bump %s %s -> %s\n\nPB LLC §3.4 / v7.0.0 §16.2b — gate-freier Pin-Bump in-line.\nAuto-synced via propagate-templates.yml.' "$TEMPLATE" "$PINNED_REF" "$TAG")
