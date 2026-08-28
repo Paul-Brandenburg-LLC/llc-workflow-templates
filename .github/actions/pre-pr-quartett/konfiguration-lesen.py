@@ -15,6 +15,12 @@ PR-kontrollierten Wert ohne Vergleich. Ein PR stufte damit ein Tier-1-Repo auf
 Tier 4 herab und liess sich unter den schwaecheren Regeln pruefen, die er sich
 selbst gegeben hatte.
 
+⚠ Der Vergleich laeuft gegen das EFFEKTIVE Tier, gleich woher es kommt. Auch
+ein ausdruecklich gesetztes `tier:` ist PR-kontrolliert — es steht in
+.github/workflows/pre-pr-quartett.yml, und diese Datei liegt im Repo, das der
+PR veraendert. Ein Schutz, der nur bei `auto` greift, waere mit einer
+Einzeiler-Aenderung an der Caller-Datei zu umgehen.
+
 Diese Fassung bricht in beiden Faellen ab (Exit 1) und gibt die geprueften
 Werte als JSON auf stdout — die Folgeschritte lesen NUR dieses JSON, damit es
 fuer die Frontmatter genau eine Lesart gibt und nicht zwei, die auseinander
@@ -105,50 +111,54 @@ def main():
         fehler("CLAUDE.md: %s — das Pre-PR-Quartett wuerde Pruefung 2a still "
                "ueberspringen und trotzdem gruen melden" % grund)
 
+    # Das effektive Tier — gleich ob es aus der Action-Eingabe oder aus der
+    # Frontmatter kommt. Beide Quellen sind PR-kontrolliert: die Eingabe steht
+    # in .github/workflows/pre-pr-quartett.yml, und diese Datei liegt im Repo,
+    # das der PR veraendert. Ein `tier: 4` dort haette den Schutz aus S-2
+    # vollstaendig umgangen — genau der Weg, den S-2 schliessen soll.
+    # (Codex-Vorpruefung Runde 1 auf diesem Zweig, P1.)
     if tier_eingabe == "auto":
         tier, grund = tier_von(kopf)
         if tier is None:
             fehler("CLAUDE.md: %s" % grund)
-
-        # S-2: Herabstufung gegen den Ziel-Branch pruefen. Traegt die Basis
-        # keine CLAUDE.md, gibt es kein Tier, das herabgestuft werden koennte
-        # — nur dann darf ohne Vergleich weitergegangen werden. Ist die Datei
-        # da, aber unlesbar, wird abgebrochen: ein unlesbarer Vergleichsstand
-        # ist kein fehlender, und "nichts zu vergleichen" waere hier genau die
-        # Ausrede, mit der eine Herabstufung durchginge.
-        if os.environ.get("BASIS_HAT_DATEI") == "1":
-            basis_datei = os.environ.get("BASIS_DATEI", "")
-            basis, grund = frontmatter(basis_datei)
-            if basis is None:
-                fehler("CLAUDE.md im Ziel-Branch: %s — ohne lesbaren "
-                       "Vergleichsstand kann eine Tier-Herabstufung nicht "
-                       "ausgeschlossen werden" % grund)
-            tier_basis, grund = tier_von(basis)
-            if tier_basis is None:
-                fehler("CLAUDE.md im Ziel-Branch: %s — ohne lesbares "
-                       "Vergleichs-Tier kann eine Herabstufung nicht "
-                       "ausgeschlossen werden" % grund)
-            if tier > tier_basis:
-                fehler("Tier-Herabstufung: Ziel-Branch tier=%d, dieser PR "
-                       "tier=%d. Die hoehere Tier-Zahl prueft schwaecher — das "
-                       "Quartett liefe unter den Regeln des PRs statt unter "
-                       "denen des Repos." % (tier_basis, tier))
-            print("✓ CLAUDE.md vorhanden, tier=%d (Ziel-Branch tier=%d)"
-                  % (tier, tier_basis), file=sys.stderr)
-        else:
-            print("::notice::Der Ziel-Branch traegt keine CLAUDE.md — kein "
-                  "Tier zum Vergleichen, nur der PR-Stand geprueft (tier=%d)"
-                  % tier, file=sys.stderr)
+        herkunft = "CLAUDE.md"
     else:
-        # Ein ausdruecklich gesetztes Tier ist nicht PR-kontrolliert, es gibt
-        # hier also nichts herabzustufen — unbrauchbar darf es trotzdem nicht
-        # sein, sonst faellt 2a stumm durch alle case-Zweige.
         if tier_eingabe not in KANONISCHE_TIER:
             fehler("Eingabe 'tier' ist nicht kanonisch (erwartet auto, 1, 2, 3 "
                    "oder 4), gelesen: %r" % tier_eingabe)
         tier = int(tier_eingabe)
-        print("✓ tier=%d aus der Action-Eingabe (kein Basis-Vergleich noetig)"
-              % tier, file=sys.stderr)
+        herkunft = "Action-Eingabe"
+
+    # S-2: Herabstufung gegen den Ziel-Branch pruefen — IMMER, nicht nur bei
+    # `auto`. Traegt die Basis keine CLAUDE.md, gibt es kein Tier, das
+    # herabgestuft werden koennte; nur dann darf ohne Vergleich weitergegangen
+    # werden. Ist die Datei da, aber unlesbar, wird abgebrochen: ein unlesbarer
+    # Vergleichsstand ist kein fehlender, und "nichts zu vergleichen" waere hier
+    # genau die Ausrede, mit der eine Herabstufung durchginge.
+    if os.environ.get("BASIS_HAT_DATEI") == "1":
+        basis_datei = os.environ.get("BASIS_DATEI", "")
+        basis, grund = frontmatter(basis_datei)
+        if basis is None:
+            fehler("CLAUDE.md im Ziel-Branch: %s — ohne lesbaren "
+                   "Vergleichsstand kann eine Tier-Herabstufung nicht "
+                   "ausgeschlossen werden" % grund)
+        tier_basis, grund = tier_von(basis)
+        if tier_basis is None:
+            fehler("CLAUDE.md im Ziel-Branch: %s — ohne lesbares "
+                   "Vergleichs-Tier kann eine Herabstufung nicht "
+                   "ausgeschlossen werden" % grund)
+        if tier > tier_basis:
+            fehler("Tier-Herabstufung: Ziel-Branch tier=%d, dieser PR prueft "
+                   "mit tier=%d (Quelle: %s). Die hoehere Tier-Zahl prueft "
+                   "schwaecher — das Quartett liefe unter den Regeln des PRs "
+                   "statt unter denen des Repos."
+                   % (tier_basis, tier, herkunft))
+        print("✓ tier=%d aus %s (Ziel-Branch tier=%d)"
+              % (tier, herkunft, tier_basis), file=sys.stderr)
+    else:
+        print("::notice::Der Ziel-Branch traegt keine CLAUDE.md — kein Tier "
+              "zum Vergleichen, nur der aktuelle Stand geprueft (tier=%d aus %s)"
+              % (tier, herkunft), file=sys.stderr)
 
     # Die geprueften Werte als EINE Wahrheit fuer die Folgeschritte. Sie lesen
     # ausschliesslich dieses JSON und nie erneut die Datei — zwei Lesarten

@@ -135,10 +135,22 @@ else fail "M-Q-1: fehlende CLAUDE.md laeuft durch — S-1 ist NICHT geschlossen"
 [ "$(lesen "$FM4" '# Basis ohne Frontmatter\n' auto)" -ne 0 ] \
   && ok "M-Q-5b: unlesbarer Vergleichsstand bricht ab statt die Pruefung zu ueberspringen" \
   || fail "M-Q-5b: unlesbare Basis laesst eine moegliche Herabstufung durch"
-# Ausdruecklich gesetztes Tier ist nicht PR-kontrolliert -> kein Basis-Vergleich.
-[ "$(lesen "$FM4" "$FM1" 4)" -eq 0 ] \
-  && ok "M-Q-6c: ein ausdruecklich gesetztes tier=4 umgeht den Basis-Vergleich (nicht PR-kontrolliert)" \
-  || fail "M-Q-6c: gesetztes Tier wird faelschlich gegen die Basis geprueft"
+# M-Q-6c: auch ein AUSDRUECKLICH gesetztes Tier wird gegen die Basis geprueft.
+# Die Eingabe steht in .github/workflows/pre-pr-quartett.yml — einer Datei im
+# Repo, die der PR veraendern kann. Ein Schutz, der nur bei `auto` greift, waere
+# mit einer Einzeiler-Aenderung an der Caller-Datei zu umgehen; genau das hat
+# die Codex-Vorpruefung auf diesem Zweig als P1 gemeldet.
+[ "$(lesen "$FM4" "$FM1" 4)" -ne 0 ] \
+  && ok "M-Q-6c: ein ausdruecklich gesetztes tier=4 gegen Basis tier=1 wird abgelehnt (Eingabe ist PR-kontrolliert)" \
+  || fail "M-Q-6c: ein gesetztes tier umgeht den Herabstufungsschutz — S-2 ist ueber die Caller-Datei zu umgehen"
+# Gegenprobe: die strengere Richtung bleibt zulaessig, sonst waere jedes Repo
+# mit ausdruecklichem Tier blockiert.
+[ "$(lesen "$FM1" "$FM4" 1)" -eq 0 ] \
+  && ok "M-Q-6e (Gegenprobe): ein ausdruecklich gesetztes tier=1 gegen Basis tier=4 passiert" \
+  || fail "M-Q-6e: die strengere Richtung wird faelschlich blockiert"
+[ "$(lesen "$FM4" "" 4)" -eq 0 ] \
+  && ok "M-Q-6f (Gegenprobe): ohne CLAUDE.md im Ziel-Branch gibt es nichts zu vergleichen" \
+  || fail "M-Q-6f: fehlende Basis-Datei blockiert faelschlich"
 [ "$(lesen "$FM4" '' 9)" -ne 0 ] \
   && ok "M-Q-6d: eine unbrauchbare tier-Eingabe bricht ab" \
   || fail "M-Q-6d: unbrauchbare tier-Eingabe laeuft durch"
