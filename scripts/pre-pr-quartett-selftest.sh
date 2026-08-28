@@ -207,6 +207,27 @@ JSON_T4_FALSE='{"tier":4,"frontmatter":{"customer":false}}'
   && ok "M-TF-5: ein String-b2c_funnel warnt nur (zwei Bestandsrepos), blockt nicht" \
   || fail "M-TF-5: die b2c_funnel-Warnstufe blockt"
 
+# E2E: das JSON aus konfiguration-lesen.py geht WIRKLICH durch pruefung-2a.sh.
+# BaseLoader liefert jeden Skalar als String ("5", "false") — eine Pruefung
+# auf jq-Typen haette jedes Tier-1-Repo geblockt und war als P1 gemeldet
+# (28.08.2026). Diese Probe schliesst die Luecke, dass Parser und 2a nur
+# getrennt geprueft wurden.
+endezuende() {  # $1=Kopf-Inhalt -> Exit von pruefung-2a auf dem echten Parser-JSON (99 = Parser brach ab)
+  local rc
+  rc=$(lesen "$1" '' auto)
+  if [ "$rc" -ne 0 ]; then echo 99; return; fi
+  ( cd "$REPO" && KONFIG_JSON="$(cat "$TMP/out")" bash "$AKTION/pruefung-2a.sh" >/dev/null 2>&1 ); echo $?
+}
+[ "$(endezuende "$FM1")" -eq 0 ] \
+  && ok "M-TF-6 (E2E): eine echte Tier-1-Frontmatter laeuft durch Parser UND 2a gruen" \
+  || fail "M-TF-6: das echte Parser-JSON blockt in 2a — BaseLoader-Strings gegen jq-Typen (der P1 vom 28.08.)"
+RC_E2E=$(endezuende '---\ntier: "2"\ncritical_paths: false\ncustomer: false\n---\n# Repo\n')
+if [ "$RC_E2E" -ne 0 ] && [ "$RC_E2E" != "99" ]; then
+  ok "M-TF-7 (E2E, Gegenprobe): 'critical_paths: false' blockt auch am echten Parser-JSON"
+else
+  fail "M-TF-7: der has()-Freibrief lebt auf dem echten Parser-Weg weiter (rc=$RC_E2E)"
+fi
+
 # ---------------------------------------------------------------------------
 # C) Statischer Waechter ueber die Klasse
 # ---------------------------------------------------------------------------
