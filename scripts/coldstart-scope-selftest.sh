@@ -5,7 +5,7 @@
 # Probe uebersprungen (run_probe=false); sonst volle Probe (DENY-FIRST).
 set -euo pipefail
 
-DOKU_RE='\.md$|\.mdx$|\.txt$|(^|/)LICENSE$|(^|/)CODEOWNERS$'
+DOKU_RE='\.md$|\.txt$|(^|/)LICENSE$|(^|/)CODEOWNERS$'
 
 # gibt "false" (skip) aus, wenn alle Zeilen Doku sind, sonst "true"
 scope() {
@@ -40,6 +40,7 @@ check true  "package.json"                     $'package.json'
 check true  "Lockfile"                         $'package-lock.json'
 check true  "PHP-Datei"                        $'public/index.php'
 check true  "Config (yaml)"                    $'astro.config.mjs'
+check true  "MDX (ausfuehrbares JSX)"          $'docs/page.mdx'
 check true  "leere Liste = unsicher → voll"    ''
 
 [ "$fail" = 0 ] && echo "coldstart-scope-selftest: ALLE OK" || { echo "coldstart-scope-selftest: FEHLER"; exit 1; }

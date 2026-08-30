@@ -76,7 +76,7 @@ jobs:
           fi
           # DENY-FIRST: nur reine Doku-DATEIENDUNGEN gelten als doku. Ein Pfad unter
           # docs/ mit Code-Endung (z.B. docs/app/server.js) faellt NICHT darunter → volle Probe.
-          nichtdoku=$(printf '%s\n' "$files" | grep -vE '\.md$|\.mdx$|\.txt$|(^|/)LICENSE$|(^|/)CODEOWNERS$' || true)
+          nichtdoku=$(printf '%s\n' "$files" | grep -vE '\.md$|\.txt$|(^|/)LICENSE$|(^|/)CODEOWNERS$' || true)
           if [ -z "$nichtdoku" ]; then
             echo "run_probe=false" >> "$GITHUB_OUTPUT"
             echo "::notice::Nur-Doku-PR — Kaltstartprobe uebersprungen (Job meldet Erfolg)"
