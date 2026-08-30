@@ -29,7 +29,11 @@ on:
         # Consumer, weitere Pfade als doc-only zu deklarieren, die Codex nicht braucht
         # (z.B. gerenderte Spec-HTML). Render-PRs #295/#298 hingen an der Bot-PR-Mention-
         # Lücke, weil ihr Diff hier nicht als doc-only durchging. Leer = kein Extra-Match.
-        description: 'Zusätzliches Regex (bash =~), das Pfade als doc-only wertet; leer = deaktiviert'
+        # ⚠ DEPRECATED seit v1.8.0: deploybare Endungen (html/php/css/js/…) sind per
+        # DENY-FIRST NIE doc-only, egal was hier steht; Spec-Publish-PRs laufen ueber
+        # den bot-exempt-Klassenpfad. Der Input bleibt nur, damit Consumer, die ihn noch
+        # uebergeben (Hub), beim Bump nicht am workflow_call-Schema scheitern.
+        description: 'DEPRECATED (v1.8.0, deny-first): Zusätzliches Regex (bash =~) für doc-only; deploybare Endungen matchen nie'
         type: string
         default: ''
         required: false
@@ -61,16 +65,153 @@ jobs:
           set -euo pipefail
           SHA=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          # --- Bot-PR-Konklusivitaets-Pflicht (PB LLC §3.4 v7.1.0) -------------------
+          # --- Bot-PR-Konklusivitaets-Pflicht (PB LLC §3.4 v7.1.0; Klassen-Gate v1.8.0) ---
           # Governance-Gates enden auf Bot-PRs konklusiv mit success (bot-exempt) —
           # ein skipped/ewig-pending Required-Check haelt den Merge-Knopf fuer immer zu
-          # (Befund 2026-07-18: 244 unmergebare Bot-PRs org-weit). Autor-basiert und
-          # event-unabhaengig, damit spaetere review/comment-Events das success nicht
-          # mit pending ueberschreiben. Merge-Entscheidung bleibt beim Sweep.
-          AUTHOR=$(gh api "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .user.login)
+          # (Befund 2026-07-18: 244 unmergebare Bot-PRs org-weit). Event-unabhaengig,
+          # damit spaetere review/comment-Events das success nicht mit pending
+          # ueberschreiben. Merge-Entscheidung bleibt beim Sweep.
+          #
+          # Seit v1.8.0 ist die Ausnahme ein KLASSEN-Gate statt Autor-Gate: der Autor
+          # allein exemptete JEDEN Diff des Bots — auch einen, der Code aendert. Jetzt
+          # muss der PR einer der vier gemessenen Bot-Werkslinien entsprechen (Branch +
+          # ggf. Titel + Diff-Pfade). Faellt ein Bot-PR durch, blockiert nichts: er
+          # laeuft durchs normale Codex-Tor und wartet auf ein Verdict.
+          PRJSON=$(gh api "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")
+          AUTHOR=$(printf '%s' "$PRJSON" | jq -r .user.login)
+          BRANCH=$(printf '%s' "$PRJSON" | jq -r .head.ref)
+          TITLE=$(printf '%s' "$PRJSON"  | jq -r .title)
+
+          # --- Geteilte Diff-Pruefung is_pin_bump (PB LLC §3.4 v7.0.5) ----------------
+          # EINE Definition fuer beide Steps (Klassen-Gate hier, Scope-Skip unten),
+          # via $RUNNER_TEMP-Lib. BYTE-IDENTISCH zu scripts/gate-2-doc-only-selftest.sh.
+          cat > "$RUNNER_TEMP/gate2-lib.sh" <<'LIB'
+          is_pin_bump() {
+            local JSON nfiles bad i patch line body key major addf rmf
+            JSON="$(cat)"
+            nfiles=$(printf '%s' "$JSON" | jq 'length')
+            case "$nfiles" in ''|*[!0-9]*) echo false; return;; esac
+            [ "$nfiles" -gt 0 ] || { echo false; return; }
+            # (a) jede geaenderte Datei ist ein Workflow-File
+            bad=$(printf '%s' "$JSON" | jq -r '[.[] | select((.filename|test("^\\.github/workflows/[^/]+\\.ya?ml$"))|not)] | length')
+            [ "$bad" = "0" ] || { echo false; return; }
+            addf="$(mktemp)"; rmf="$(mktemp)"
+            i=0
+            while [ "$i" -lt "$nfiles" ]; do
+              patch=$(printf '%s' "$JSON" | jq -r ".[$i].patch // \"\"")
+              while IFS= read -r line; do
+                case "$line" in
+                  '+++'*|'---'*|'@@'*|' '*|'') : ;;
+                  '+'*|'-'*)
+                    # (b) jede +/- Zeile MUSS eine Org-Reusable-uses-Zeile mit Semver-Tag sein:
+                    #     Reusable-Workflow (workflows/<f>.yml, Job-Ebene) ODER Composite
+                    #     Action (actions/<name>, Step-Ebene mit Listen-'- ') — P1 Runde 4.
+                    if ! printf '%s\n' "$line" | grep -qE '^[-+][[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*Paul-Brandenburg-LLC/llc-workflow-templates/\.github/(workflows/[A-Za-z0-9._-]+\.ya?ml|actions/[A-Za-z0-9._-]+)@v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$'; then
+                      command rm -f "$addf" "$rmf"; echo false; return
+                    fi
+                    body=${line:1}
+                    major=$(printf '%s' "$body" | sed -E 's/.*@v([0-9]+)\.[0-9]+\.[0-9]+[[:space:]]*$/\1/')
+                    key=$(printf '%s' "$body" | sed -E 's/@v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$//')
+                    case "$line" in
+                      '+'*) printf '%s\t%s\n' "$key" "$major" >> "$addf" ;;
+                      '-'*) printf '%s\t%s\n' "$key" "$major" >> "$rmf"  ;;
+                    esac
+                    ;;
+                  *) : ;;
+                esac
+              done <<< "$patch"
+              i=$((i + 1))
+            done
+            # (e) mind. je eine +/- Zeile; (c)+(d) Multiset (key,major): added == removed
+            if [ -s "$addf" ] && [ -s "$rmf" ] && diff <(sort "$addf") <(sort "$rmf") >/dev/null; then
+              command rm -f "$addf" "$rmf"; echo true
+            else
+              command rm -f "$addf" "$rmf"; echo false
+            fi
+          }
+          LIB
+          # shellcheck disable=SC1091
+          source "$RUNNER_TEMP/gate2-lib.sh"
+
+          lade_diff() {  # fuellt FILES_JSON (alle Diff-Dateien inkl. .patch) genau einmal
+            local erwartet geladen
+            if [ -z "${FILES_JSON:-}" ]; then
+              FILES_JSON=$(gh api --paginate "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" | jq -s '(add // [])')
+              # Fail-closed (P1 Runde 2): der files-Endpunkt liefert hoechstens 3000
+              # Eintraege — stimmt die Zahl nicht mit changed_files des PR ueberein,
+              # ist der Diff unvollstaendig und darf NIE eine Exempt-Klasse belegen
+              # (leeres Array laesst jede Diff-Pruefung scheitern).
+              erwartet=$(printf '%s' "$PRJSON" | jq -r '.changed_files // -1')
+              geladen=$(printf '%s' "$FILES_JSON" | jq 'length')
+              if [ "$geladen" != "$erwartet" ]; then FILES_JSON='[]'; fi
+            fi
+          }
+          alle_patches_vorhanden() {  # true, wenn der Diff >0 Dateien hat und JEDE einen Patch traegt
+            local n ohne
+            lade_diff
+            n=$(printf '%s' "$FILES_JSON" | jq 'length')
+            case "$n" in ''|*[!0-9]*) return 1 ;; esac
+            [ "$n" -gt 0 ] || return 1
+            # Fail-closed (P1 Runde 2): binaere oder zu grosse Dateien haben kein
+            # .patch-Feld — ihr Inhalt ist unpruefbar, also keine Exempt-Klasse.
+            ohne=$(printf '%s' "$FILES_JSON" | jq -r '[.[] | select((.patch // "") == "")] | length')
+            [ "$ohne" = "0" ]
+          }
+          alle_dateien_unter() {  # $1=Pfad-Regex; true, wenn der Diff >0 Dateien hat und JEDE matcht
+            local n bad
+            lade_diff
+            n=$(printf '%s' "$FILES_JSON" | jq 'length')
+            case "$n" in ''|*[!0-9]*) return 1 ;; esac
+            [ "$n" -gt 0 ] || return 1
+            # Renames (P1 Runde 3): auch der ALTE Pfad muss die Grenze einhalten —
+            # sonst schoebe ein status:renamed z.B. einen Workflow nach tasks/.
+            bad=$(printf '%s' "$FILES_JSON" | jq -r --arg re "$1" '[.[] | select( ((.filename|test($re))|not) or (((.previous_filename // .filename)|test($re))|not) )] | length')
+            [ "$bad" = "0" ]
+          }
+          patch_zeilen_nur() {  # $1=Zeilen-Regex; true, wenn es +/- Patchzeilen gibt und JEDE matcht
+            local lines
+            lade_diff
+            lines=$(printf '%s' "$FILES_JSON" | jq -r '.[].patch // ""' | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' || true)
+            [ -n "$lines" ] || return 1
+            ! printf '%s\n' "$lines" | grep -qvE "$1"
+          }
+
+          BOT_EXEMPT=false
           case "$AUTHOR" in
-            'dependabot[bot]'|'pb-llc-auto-fix-bot[bot]') BOT_EXEMPT=true ;;
-            *) BOT_EXEMPT=false ;;
+            'dependabot[bot]')
+              # (1) Dependabot arbeitet ausschliesslich auf eigenen Branches.
+              case "$BRANCH" in dependabot/*) BOT_EXEMPT=true ;; esac ;;
+            'pb-llc-auto-fix-bot[bot]')
+              if printf '%s\n' "$BRANCH" | grep -qE '^chore/pin-bump-[A-Za-z0-9._-]+-v[0-9]+\.[0-9]+\.[0-9]+$' \
+                 && printf '%s\n' "$TITLE" | grep -qiE 'pin|bump'; then
+                # (2a) Workflow-Pin-Welle (propagate-templates.yml; seed-/auto-sync-
+                #      Branches fallen BEWUSST durch — sie tragen echte Workflow-Diffs).
+                #      Diff-Gegenprobe: der GESAMTE Patch muss ein reiner Tag-Bump sein;
+                #      alle Dateien muessen einen pruefbaren Patch tragen (fail-closed).
+                if alle_patches_vorhanden \
+                   && [ "$(printf '%s' "$FILES_JSON" | is_pin_bump)" = "true" ]; then
+                  BOT_EXEMPT=true
+                fi
+              elif [ "$BRANCH" = "chore/plugin-pin-bump" ] \
+                 && printf '%s\n' "$TITLE" | grep -qE '^chore\(plugin\): bump pin to v[0-9]+\.[0-9]+\.[0-9]+$' \
+                 && alle_dateien_unter '^CLAUDE\.md$' \
+                 && alle_patches_vorhanden \
+                 && patch_zeilen_nur '^[+-]plugin_version: "[0-9]+\.[0-9]+\.[0-9]+"$'; then
+                # (2b) Plugin-Pin-Welle (auto-pin-bump.yml): Diff darf NUR die
+                #      plugin_version-Zeile in CLAUDE.md drehen (gemessen an
+                #      freiestimme-net-site#124).
+                BOT_EXEMPT=true
+              elif printf '%s\n' "$BRANCH" | grep -qE '^bot/publish-specs-[0-9]+$' \
+                 && alle_dateien_unter '^llc-checkliste-deploy/specs/'; then
+                # (3) Spec-Publish (Hub). MUSS exempt bleiben: haengt der Publish-PR,
+                #     steht der Render-Beweis aus -> Drift-Lock org-weit (Publish-Deadlock).
+                BOT_EXEMPT=true
+              elif printf '%s\n' "$BRANCH" | grep -qE '^chore/cloud-dispatch-[0-9]{8}-[0-9]{6}$' \
+                 && alle_dateien_unter '^tasks/'; then
+                # (4) Cloud-Dispatch-State (gemessen an llc-ops-backlog#1100/#1101:
+                #     Diff ausschliesslich tasks/*.yml).
+                BOT_EXEMPT=true
+              fi ;;
           esac
           echo "bot_exempt=$BOT_EXEMPT" >> "$GITHUB_OUTPUT"
 
@@ -119,53 +260,24 @@ jobs:
           # true, wenn der GESAMTE Diff ausschliesslich den Versions-Tag bestehender
           # Org-Reusable-uses-Zeilen in .github/workflows/*.yml aendert (kein Ziel-/
           # with:-/Zeilen-Wechsel, kein Major-Bump, keine weiteren Hunks/Dateien).
-          # DIESE FUNKTION IST BYTE-IDENTISCH zu scripts/gate-2-doc-only-selftest.sh.
-          is_pin_bump() {
-            local JSON nfiles bad i patch line body key major addf rmf
-            JSON="$(cat)"
-            nfiles=$(printf '%s' "$JSON" | jq 'length')
-            case "$nfiles" in ''|*[!0-9]*) echo false; return;; esac
-            [ "$nfiles" -gt 0 ] || { echo false; return; }
-            # (a) jede geaenderte Datei ist ein Workflow-File
-            bad=$(printf '%s' "$JSON" | jq -r '[.[] | select((.filename|test("^\\.github/workflows/[^/]+\\.ya?ml$"))|not)] | length')
-            [ "$bad" = "0" ] || { echo false; return; }
-            addf="$(mktemp)"; rmf="$(mktemp)"
-            i=0
-            while [ "$i" -lt "$nfiles" ]; do
-              patch=$(printf '%s' "$JSON" | jq -r ".[$i].patch // \"\"")
-              while IFS= read -r line; do
-                case "$line" in
-                  '+++'*|'---'*|'@@'*|' '*|'') : ;;
-                  '+'*|'-'*)
-                    # (b) jede +/- Zeile MUSS eine Org-Reusable-uses-Zeile mit Semver-Tag sein
-                    if ! printf '%s\n' "$line" | grep -qE '^[-+][[:space:]]*uses:[[:space:]]*Paul-Brandenburg-LLC/llc-workflow-templates/\.github/workflows/[A-Za-z0-9._-]+\.ya?ml@v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$'; then
-                      command rm -f "$addf" "$rmf"; echo false; return
-                    fi
-                    body=${line:1}
-                    major=$(printf '%s' "$body" | sed -E 's/.*@v([0-9]+)\.[0-9]+\.[0-9]+[[:space:]]*$/\1/')
-                    key=$(printf '%s' "$body" | sed -E 's/@v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$//')
-                    case "$line" in
-                      '+'*) printf '%s\t%s\n' "$key" "$major" >> "$addf" ;;
-                      '-'*) printf '%s\t%s\n' "$key" "$major" >> "$rmf"  ;;
-                    esac
-                    ;;
-                  *) : ;;
-                esac
-              done <<< "$patch"
-              i=$((i + 1))
-            done
-            # (e) mind. je eine +/- Zeile; (c)+(d) Multiset (key,major): added == removed
-            if [ -s "$addf" ] && [ -s "$rmf" ] && diff <(sort "$addf") <(sort "$rmf") >/dev/null; then
-              command rm -f "$addf" "$rmf"; echo true
-            else
-              command rm -f "$addf" "$rmf"; echo false
-            fi
-          }
+          # Definition kommt aus der geteilten Lib, die der Step "Resolve PR HEAD"
+          # nach $RUNNER_TEMP schreibt (BYTE-IDENTISCH zu scripts/gate-2-doc-only-
+          # selftest.sh; seit v1.8.0 nutzt auch das bot-exempt-Klassen-Gate sie).
+          # shellcheck disable=SC1091
+          source "$RUNNER_TEMP/gate2-lib.sh"
 
           FILES=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json files --jq '.files[].path')
           DOC_ONLY=1
           while IFS= read -r f; do
             [ -z "$f" ] && continue
+            # DENY-FIRST (v1.8.0): deploybare Endungen sind NIE doc-only — auch dann
+            # nicht, wenn EXTRA_DOC_ONLY_REGEX sie matcht. Ein Render-Regex, das .html
+            # abdeckt, truege sonst jeden beliebigen Code-Diff am Codex-Tor vorbei.
+            # (Spec-Publish-PRs des Hubs laufen seit v1.8.0 ueber den bot-exempt-Pfad,
+            # Klasse 3 — sie brauchen dieses Loch nicht mehr.)
+            if [[ "$f" =~ \.(html?|php|css|js|mjs|cjs|ts|tsx|jsx|vue|svelte|py|rb|sql|sh|bash)$ ]]; then
+              DOC_ONLY=0; break
+            fi
             # Eine Datei ist doc-only, wenn sie eines der Standard-Muster ODER (falls gesetzt)
             # das Consumer-Extra-Regex matcht (PB LLC §3.4 v7.0.4 Render-PR-Regel).
             if [[ ! "$f" =~ \.(md|markdown)$ ]] && \
@@ -189,7 +301,10 @@ jobs:
             SKIP=true; REASON="Doc-only skip"
           else
             PATCHES=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --paginate | jq -s '(add // [])')
-            if [ "$(printf '%s' "$PATCHES" | is_pin_bump)" = "true" ]; then
+            # Fail-closed (P1 Runde 5): Dateien ohne .patch (binaer/zu gross) sind
+            # unpruefbar und duerfen den Pin-Bump-Skip nicht passieren.
+            OHNE_PATCH=$(printf '%s' "$PATCHES" | jq -r '[.[] | select((.patch // "") == "")] | length')
+            if [ "$OHNE_PATCH" = "0" ] && [ "$(printf '%s' "$PATCHES" | is_pin_bump)" = "true" ]; then
               SKIP=true; REASON="pin-bump-skip (§3.4 v7.0.5)"
             fi
           fi

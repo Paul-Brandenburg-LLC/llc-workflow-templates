@@ -15,6 +15,14 @@ scope_is_doc_only() {
   FILES="$(cat)"
   while IFS= read -r f; do
     [ -z "$f" ] && continue
+    # DENY-FIRST (v1.8.0): deploybare Endungen sind NIE doc-only — auch dann
+    # nicht, wenn EXTRA_DOC_ONLY_REGEX sie matcht. Ein Render-Regex, das .html
+    # abdeckt, truege sonst jeden beliebigen Code-Diff am Codex-Tor vorbei.
+    # (Spec-Publish-PRs des Hubs laufen seit v1.8.0 ueber den bot-exempt-Pfad,
+    # Klasse 3 — sie brauchen dieses Loch nicht mehr.)
+    if [[ "$f" =~ \.(html?|php|css|js|mjs|cjs|ts|tsx|jsx|vue|svelte|py|rb|sql|sh|bash)$ ]]; then
+      DOC_ONLY=0; break
+    fi
     if [[ ! "$f" =~ \.(md|markdown)$ ]] && \
        [[ ! "$f" =~ ^docs/ ]] && \
        [[ ! "$f" =~ ^CHANGELOG ]] && \
@@ -49,8 +57,10 @@ is_pin_bump() {
       case "$line" in
         '+++'*|'---'*|'@@'*|' '*|'') : ;;
         '+'*|'-'*)
-          # (b) jede +/- Zeile MUSS eine Org-Reusable-uses-Zeile mit Semver-Tag sein
-          if ! printf '%s\n' "$line" | grep -qE '^[-+][[:space:]]*uses:[[:space:]]*Paul-Brandenburg-LLC/llc-workflow-templates/\.github/workflows/[A-Za-z0-9._-]+\.ya?ml@v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$'; then
+          # (b) jede +/- Zeile MUSS eine Org-Reusable-uses-Zeile mit Semver-Tag sein:
+          #     Reusable-Workflow (workflows/<f>.yml, Job-Ebene) ODER Composite
+          #     Action (actions/<name>, Step-Ebene mit Listen-'- ') — P1 Runde 4.
+          if ! printf '%s\n' "$line" | grep -qE '^[-+][[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*Paul-Brandenburg-LLC/llc-workflow-templates/\.github/(workflows/[A-Za-z0-9._-]+\.ya?ml|actions/[A-Za-z0-9._-]+)@v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$'; then
             command rm -f "$addf" "$rmf"; echo false; return
           fi
           body=${line:1}
@@ -99,11 +109,20 @@ V=$(printf 'feedback_x.md\ndocs/y.md\nCHANGELOG.md\n' | scope_is_doc_only ''); c
 # 4) Render-HTML OHNE Extra-Regex → NICHT doc-only (Regression-Schutz: Default-Verhalten)
 V=$(printf 'llc-checkliste-deploy/specs/v7.html\n' | scope_is_doc_only ''); check "render-html-no-extra→blocks" false "$V"
 
-# 5) Render-HTML MIT Extra-Regex → doc-only (Render-PR-Regel greift)
-V=$(printf 'llc-checkliste-deploy/specs/v7.html\n' | scope_is_doc_only "$RENDER_RE"); check "render-html-with-extra" true "$V"
+# 5) Render-HTML MIT Extra-Regex → seit v1.8.0 NICHT doc-only (DENY-FIRST schlaegt
+#    das Extra-Regex; Spec-Publish-PRs laufen ueber den bot-exempt-Klassenpfad)
+V=$(printf 'llc-checkliste-deploy/specs/v7.html\n' | scope_is_doc_only "$RENDER_RE"); check "render-html-with-extra→deny-first-blocks" false "$V"
 
-# 6) Render-HTML + Markdown MIT Extra-Regex → doc-only (Mix erlaubt)
-V=$(printf 'llc-checkliste-deploy/specs/v7.html\nREADME.md\n' | scope_is_doc_only "$RENDER_RE"); check "render-html+md-with-extra" true "$V"
+# 6) Render-HTML + Markdown MIT Extra-Regex → NICHT doc-only (DENY-FIRST, v1.8.0)
+V=$(printf 'llc-checkliste-deploy/specs/v7.html\nREADME.md\n' | scope_is_doc_only "$RENDER_RE"); check "render-html+md-with-extra→deny-first-blocks" false "$V"
+
+# 6b) DENY-FIRST greift fuer jede deploybare Endung, selbst mit Match-All-Regex
+V=$(printf 'index.php\n' | scope_is_doc_only '.*'); check "deny-first-php-vs-matchall" false "$V"
+V=$(printf 'assets/app.js\n' | scope_is_doc_only '.*'); check "deny-first-js-vs-matchall" false "$V"
+V=$(printf 'style.css\n' | scope_is_doc_only '.*'); check "deny-first-css-vs-matchall" false "$V"
+
+# 6c) Nicht-deploybare Endung MIT Extra-Regex bleibt erlaubt (deny-first ist eng)
+V=$(printf 'notes/plan.txt\n' | scope_is_doc_only '^notes/'); check "extra-regex-txt-still-allowed" true "$V"
 
 # 7) Render-HTML + Code MIT Extra-Regex → NICHT doc-only (Code bleibt blockierend)
 V=$(printf 'llc-checkliste-deploy/specs/v7.html\nsrc/app.ts\n' | scope_is_doc_only "$RENDER_RE"); check "render-html+code-with-extra→blocks" false "$V"
@@ -153,6 +172,11 @@ V=$(files_json '.github/workflows/gate-2-codex.yml' "$P" | is_pin_bump); check "
 # P6) uses-Ziel-Aenderung (Pfad wechselt, gleicher Tag) → KEIN SKIP
 P=$(printf '@@ -1,2 +1,2 @@\n-%s/gate-2-codex.yml@v1.5.2\n+%s/review.yml@v1.5.2\n' "$USESLINE" "$USESLINE")
 V=$(files_json '.github/workflows/gate-2-codex.yml' "$P" | is_pin_bump); check "pinbump-target-change→blocks" false "$V"
+
+# P7b) Composite-Action-Pin-Bump (Step-Ebene, '- uses: …/.github/actions/<name>@vX.Y.Z') → SKIP
+ACTLINE='      - uses: Paul-Brandenburg-LLC/llc-workflow-templates/.github/actions/pre-pr-quartett'
+P=$(printf '@@ -18,3 +18,3 @@ steps:\n-%s@v1.7.0\n+%s@v1.7.1\n' "$ACTLINE" "$ACTLINE")
+V=$(files_json '.github/workflows/pre-pr-quartett.yml' "$P" | is_pin_bump); check "pinbump-composite-action" true "$V"
 
 # P7) Nicht-Workflow-Datei (Pfad ausserhalb .github/workflows) → KEIN SKIP
 P=$(printf '@@ -1,2 +1,2 @@\n-%s/gate-2-codex.yml@v1.5.2\n+%s/gate-2-codex.yml@v1.5.3\n' "$USESLINE" "$USESLINE")

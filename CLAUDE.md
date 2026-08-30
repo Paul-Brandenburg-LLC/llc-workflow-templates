@@ -33,8 +33,10 @@ Details + Rollout: `docs/gate-1-verdict.md`. Beweis: `scripts/gate-1-verdict-sel
 ## gate-2-codex: bridge-Status (seit v1.1.5, 2026-06-02)
 Der `gate-2-codex.yml`-Reusable-Job heißt `bridge` → GitHub erzeugt den Check-Run `bridge / bridge`, der den Required-Context `bridge` (in manchen Consumer-Repos) NICHT matcht. Seit **v1.1.5** postet der Workflow den Status daher unter BEIDEN Contexts (`gate-2-codex` + `bridge`), additiv. Behebt das Auto-Merge-Hängen von Daemon-Flush-PRs (PR #14).
 
-## gate-2-codex: bot-exempt (seit v1.6.0, 2026-07-18, PB LLC §3.4 v7.1.0)
-PRs von `dependabot[bot]` / `pb-llc-auto-fix-bot[bot]` bekommen sofort Status `success` (Begründung `bot-exempt`) unter beiden Contexts — Governance-Gates prüfen Session-Arbeit, nicht Bot-Diffs; Test-Checks bleiben die inhaltliche Absicherung, Merge-Entscheidung beim `/llc-dependabot-sweep`. Autor-Check läuft im HEAD-Step (event-unabhängig), damit spätere review/comment-Events das `success` nicht mit `pending` überschreiben.
+## gate-2-codex: bot-exempt (seit v1.6.0, 2026-07-18, PB LLC §3.4 v7.1.0; Klassen-Gate seit v1.8.0)
+Bot-PRs bekommen sofort Status `success` (Begründung `bot-exempt`) unter beiden Contexts — Governance-Gates prüfen Session-Arbeit, nicht Bot-Diffs; Test-Checks bleiben die inhaltliche Absicherung, Merge-Entscheidung beim `/llc-dependabot-sweep`. Check läuft im HEAD-Step (event-unabhängig), damit spätere review/comment-Events das `success` nicht mit `pending` überschreiben.
+**Seit v1.8.0 ist das ein KLASSEN-Gate statt Autor-Gate** (der Autor allein exemptete jeden Diff). Exempt sind nur die vier gemessenen Werkslinien: (1) `dependabot[bot]` + Branch `dependabot/*`; (2) `pb-llc-auto-fix-bot[bot]` + Pin-Wellen (`chore/pin-bump-<tpl>-vX.Y.Z` mit Titel-Gegenprobe bzw. `chore/plugin-pin-bump` + exakte Titelform); (3) `bot/publish-specs-<runid>` + Diff NUR `llc-checkliste-deploy/specs/` (muss exempt bleiben — sonst Publish-Deadlock → Drift-Lock org-weit); (4) `chore/cloud-dispatch-<ts>` + Diff NUR `tasks/`. Alles andere (auch `chore/auto-sync-*`/`chore/seed-*`) läuft durchs normale Codex-Tor. Beweis: `scripts/gate-2-bot-exempt-selftest.sh`.
+**Doc-only DENY-FIRST (v1.8.0):** deploybare Endungen (html/php/css/js/ts/…) sind NIE doc-only, egal welches `extra_doc_only_regex` der Consumer übergibt — der Input ist deprecated und bleibt nur fürs workflow_call-Schema erhalten.
 
 ## Critical Lessons
 - Workflow-Files müssen `actionlint`-clean sein (CI prüft das)
