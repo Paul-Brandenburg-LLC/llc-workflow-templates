@@ -68,7 +68,9 @@ jobs:
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             echo "run_probe=true" >> "$GITHUB_OUTPUT"; echo "push/kein-PR → volle Probe"; exit 0
           fi
-          files=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          # --no-renames: bei Umbenennungen erscheinen BEIDE Pfade (auch der alte
+          # Code-Pfad) → ein Rennen von Code nach *.md kann die Probe nicht umgehen.
+          files=$(git diff --name-only --no-renames "$BASE_SHA" "$HEAD_SHA")
           if [ -z "$files" ]; then
             echo "run_probe=true" >> "$GITHUB_OUTPUT"; echo "kein Diff ermittelbar → volle Probe (sicher)"; exit 0
           fi
