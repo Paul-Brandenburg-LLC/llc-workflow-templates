@@ -72,7 +72,9 @@ jobs:
           if [ -z "$files" ]; then
             echo "run_probe=true" >> "$GITHUB_OUTPUT"; echo "kein Diff ermittelbar → volle Probe (sicher)"; exit 0
           fi
-          nichtdoku=$(printf '%s\n' "$files" | grep -vE '(^|/)docs/|\.md$|\.mdx$|\.txt$|(^|/)LICENSE$|(^|/)CODEOWNERS$' || true)
+          # DENY-FIRST: nur reine Doku-DATEIENDUNGEN gelten als doku. Ein Pfad unter
+          # docs/ mit Code-Endung (z.B. docs/app/server.js) faellt NICHT darunter → volle Probe.
+          nichtdoku=$(printf '%s\n' "$files" | grep -vE '\.md$|\.mdx$|\.txt$|(^|/)LICENSE$|(^|/)CODEOWNERS$' || true)
           if [ -z "$nichtdoku" ]; then
             echo "run_probe=false" >> "$GITHUB_OUTPUT"
             echo "::notice::Nur-Doku-PR — Kaltstartprobe uebersprungen (Job meldet Erfolg)"

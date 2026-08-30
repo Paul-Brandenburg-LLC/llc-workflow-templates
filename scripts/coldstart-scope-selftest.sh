@@ -5,7 +5,7 @@
 # Probe uebersprungen (run_probe=false); sonst volle Probe (DENY-FIRST).
 set -euo pipefail
 
-DOKU_RE='(^|/)docs/|\.md$|\.mdx$|\.txt$|(^|/)LICENSE$|(^|/)CODEOWNERS$'
+DOKU_RE='\.md$|\.mdx$|\.txt$|(^|/)LICENSE$|(^|/)CODEOWNERS$'
 
 # gibt "false" (skip) aus, wenn alle Zeilen Doku sind, sonst "true"
 scope() {
@@ -26,7 +26,11 @@ check() { # $1=erwartet $2=beschreibung $3=dateiliste
 check false "reine Markdown-Aenderung"        $'README.md\ndocs/guide.md'
 check false "CLAUDE.md Pin-Bump"               $'CLAUDE.md'
 check false "LICENSE + Textdatei"              $'LICENSE\nnotes.txt'
-check false "docs-Unterordner"                 $'docs/adr/0003.md'
+check false "docs-Unterordner (Markdown)"      $'docs/adr/0003.md'
+
+# Code unter docs/ ist KEIN Doku → volle Probe (Codex-P1-Fix)
+check true  "Code unter docs/ (JS)"            $'docs/app/server.js'
+check true  "docs/ Bild ohne Doku-Endung"      $'docs/img/logo.png'
 
 # Alles mit Code/Config/Workflow/Lockfile → volle Probe (true)
 check true  "App-Code geaendert"               $'src/main.ts'
