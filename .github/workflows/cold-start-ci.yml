@@ -48,35 +48,71 @@ jobs:
       SESSION_SECRET: cold-start-ci-secret
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          fetch-depth: 0
+
+      # PB LLC §7.2 Tempo: Bei PRs, die AUSSCHLIESSLICH reine Doku aendern
+      # (Markdown/Text/LICENSE/docs/), bringt die Laufzeit-Kaltstartprobe keinen
+      # Erkenntnisgewinn — es gibt keinen geaenderten Code, der crashen koennte.
+      # Der Job laeuft dann trotzdem durch und meldet Erfolg (Required-Check
+      # bleibt erhalten), ueberspringt aber Build + Probe. DENY-FIRST: sobald EINE
+      # Datei nicht ins Doku-Muster passt (auch Config/Workflow/Lockfiles), laeuft
+      # die volle Probe. push-Events auf main laufen immer voll.
+      - name: Scope — laueft die Probe?
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "run_probe=true" >> "$GITHUB_OUTPUT"; echo "push/kein-PR → volle Probe"; exit 0
+          fi
+          # --no-renames: bei Umbenennungen erscheinen BEIDE Pfade (auch der alte
+          # Code-Pfad) → ein Rennen von Code nach *.md kann die Probe nicht umgehen.
+          files=$(git diff --name-only --no-renames "$BASE_SHA" "$HEAD_SHA")
+          if [ -z "$files" ]; then
+            echo "run_probe=true" >> "$GITHUB_OUTPUT"; echo "kein Diff ermittelbar → volle Probe (sicher)"; exit 0
+          fi
+          # DENY-FIRST: nur reine Doku-DATEIENDUNGEN gelten als doku. Ein Pfad unter
+          # docs/ mit Code-Endung (z.B. docs/app/server.js) faellt NICHT darunter → volle Probe.
+          nichtdoku=$(printf '%s\n' "$files" | grep -vE '\.md$|\.txt$|(^|/)LICENSE$|(^|/)CODEOWNERS$' || true)
+          if [ -z "$nichtdoku" ]; then
+            echo "run_probe=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Nur-Doku-PR — Kaltstartprobe uebersprungen (Job meldet Erfolg)"
+          else
+            echo "run_probe=true" >> "$GITHUB_OUTPUT"
+            echo "Code/Config geaendert → volle Probe:"; printf '%s\n' "$nichtdoku"
+          fi
 
       - name: Setup Node (if node-stack)
-        if: inputs.stack == 'node'
+        if: inputs.stack == 'node' && steps.scope.outputs.run_probe == 'true'
         uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b
         with:
           node-version: '22'
           cache: 'npm'
 
       - name: Setup Go (if go-stack)
-        if: inputs.stack == 'go'
+        if: inputs.stack == 'go' && steps.scope.outputs.run_probe == 'true'
         uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Setup PHP (if php-stack)
-        if: inputs.stack == 'php'
+        if: inputs.stack == 'php' && steps.scope.outputs.run_probe == 'true'
         uses: shivammathur/setup-php@cf4cade2721270509d5b1c766ab3549210a39a2a
         with:
           php-version: '8.2'
 
       - name: Build (node)
-        if: inputs.stack == 'node'
+        if: inputs.stack == 'node' && steps.scope.outputs.run_probe == 'true'
         run: |
           npm ci --no-audit --no-fund
           npm run build || echo "::warning::no build script"
 
       - name: Build (go) — robustes main-package-finden
-        if: inputs.stack == 'go'
+        if: inputs.stack == 'go' && steps.scope.outputs.run_probe == 'true'
         run: |
           set -euo pipefail
           pkg=$(go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./... 2>/dev/null | grep -v '^$' | head -1)
@@ -91,6 +127,7 @@ jobs:
           go build -o /tmp/app "$pkg"
 
       - name: Cold-start with unreachable external deps
+        if: steps.scope.outputs.run_probe == 'true'
         run: |
           set +e
           case "${{ inputs.stack }}" in
