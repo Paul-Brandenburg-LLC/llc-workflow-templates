@@ -580,7 +580,7 @@ jobs:
             #    Kette. ⛔ Ihn hier wieder einzubauen waere ein Rueckschritt:
             #    dann gaebe es zwei Wahrheiten, die auseinanderlaufen koennen.
             #
-            local ZEILEN GESAMT FERTIG
+            local ZEILEN NICHT_EINORDBAR NEUESTE
             # (a) Befund-Marker im Body schlagen alles.
             if echo "$1" | grep -qE '### Integrations-Befunde|### Findings|🚨|\*\*P[01]\*\*'; then echo failure; return; fi
             # (b) Sonst entscheidet die Form des Bodys.
@@ -595,29 +595,48 @@ jobs:
               #   - `**Completed**`.
               # Fehlt eines davon, bleibt es `pending` — die Irrtumsrichtung
               # zeigt auf "zu vorsichtig", nie auf "zu gruen".
-              # (P1, Vorpruefung Runde 13) ZAEHLEN statt SUCHEN.
-              # Die Summary traegt je Review-LAUF eine eigene Zeile. Nach
-              # einem erneut angestossenen Review steht neben dem alten
-              # `Completed` ein neues `Running` — fuer DENSELBEN HEAD. Ein
-              # `grep -q '**Completed**'` fand die alte Zeile und gab frei,
-              # waehrend der neue Lauf noch lief; es konnte waehrend eines
-              # laufenden Re-Reviews gemergt werden.
-              # "Es gibt eine gruene Zeile" ist nie dasselbe wie "es gibt
-              # keine ungruene Zeile" — derselbe Denkfehler wie in Runde 11,
-              # dort ueber Review-ARTEN, hier ueber mehrere LAEUFE derselben
-              # Art. Deshalb: alle Code-Review-Zeilen zum HEAD einsammeln und
-              # die Gesamtzahl gegen die Zahl der fertigen halten. Sobald EINE
-              # davon nicht `**Completed**` traegt, bleibt es `pending`.
-              # Beweis: scripts/gate-2-verdict-selftest.sh (V17/V18).
+              # (P1, Vorpruefung Runden 13 und 14) Die Summary traegt je
+              # Review-LAUF eine eigene Zeile. Zwei entgegengesetzte Loecher
+              # liegen hier dicht beieinander:
+              #
+              #  R13 (zu gruen): Ein `grep -q '**Completed**'` fand die Zeile
+              #  eines ALTEN, fertigen Laufs, waehrend fuer denselben HEAD
+              #  schon ein neuer Lauf auf `Running` stand — es konnte waehrend
+              #  eines laufenden Re-Reviews gemergt werden. "Es gibt eine
+              #  gruene Zeile" ist nie dasselbe wie "es gibt keine ungruene".
+              #
+              #  R14 (zu rot, ein NEUER Deadlock): Zu verlangen, dass ALLE
+              #  Zeilen `**Completed**` tragen, sperrt fuer immer, sobald ein
+              #  abgebrochener oder fehlgeschlagener Lauf stehenbleibt — ein
+              #  spaeter erfolgreicher Re-Review holt das Tor nie mehr aus
+              #  `pending`. Genau die Fehlerklasse, die dieser PR heilt.
+              #
+              # Beides zugleich loest die AKTUALITAET, nicht eine Liste von
+              # Statusworten (eine solche Liste waere in der einen Richtung
+              # umgehbar und in der anderen wieder ein Deadlock): Es
+              # entscheidet der NEUESTE Lauf am HEAD. Sein `Completed` ersetzt
+              # aeltere terminale Versuche (R14); ist er noch nicht fertig,
+              # bleibt es `pending` (R13).
+              # Zeitstempel sind belastbar: an 73 echten Summary-Zeilen aus
+              # 37 Repos (05.09.2026) traegt JEDE Code-Review-Zeile ein
+              # `<relative-time datetime=…>` in UTC — lexikalisch sortierbar.
+              # Beweis: scripts/gate-2-verdict-selftest.sh (V17-V23).
               ZEILEN="$(echo "$1" | grep -F -e "$HEAD_SHA" -e "$SHORT_SHA" | grep -F '**Code Review**' || true)"
               [ -n "$ZEILEN" ] || { echo ""; return; }
-              GESAMT="$(printf '%s\n' "$ZEILEN" | grep -cF '**Code Review**' || true)"
-              FERTIG="$(printf '%s\n' "$ZEILEN" | grep -cF '**Completed**' || true)"
-              # Nicht zaehlbar ist kein Urteil — Irrtumsrichtung "zu vorsichtig".
-              case "$GESAMT" in ''|*[!0-9]*) echo ""; return;; esac
-              case "$FERTIG" in ''|*[!0-9]*) echo ""; return;; esac
-              if [ "$GESAMT" -ge 1 ] && [ "$GESAMT" -eq "$FERTIG" ]; then echo success
-              else echo ""; fi
+              # (1) Eine Zeile OHNE Zeitstempel laesst sich nicht einordnen.
+              #     Traegt sie zudem kein `**Completed**`, ist sie nicht fertig
+              #     und koennte der neueste Lauf sein -> `pending`.
+              NICHT_EINORDBAR="$(printf '%s\n' "$ZEILEN" | grep -v 'datetime="' | grep -vF '**Completed**' || true)"
+              [ -z "$NICHT_EINORDBAR" ] || { echo ""; return; }
+              # (2) Die neueste Zeile MIT Zeitstempel.
+              NEUESTE="$(printf '%s\n' "$ZEILEN" | awk 'match($0, /datetime="[^"]*"/) { ts = substr($0, RSTART + 10, RLENGTH - 11); if (ts > neuste) { neuste = ts; zeile = $0 } } END { if (neuste != "") print zeile }')"
+              # (3) Traegt gar keine Zeile einen Zeitstempel, sind nach (1) alle
+              #     `**Completed**` — dann gibt es nichts, was blockieren koennte.
+              [ -n "$NEUESTE" ] || { echo success; return; }
+              case "$NEUESTE" in
+                *'**Completed**'*) echo success ;;
+                *) echo "" ;;
+              esac
             elif echo "$1" | grep -qE '^### 💡 Codex Review|^### Codex Review|^Codex Review: '; then echo success
             else echo ""; fi
           }

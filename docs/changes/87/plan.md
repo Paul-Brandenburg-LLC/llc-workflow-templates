@@ -205,9 +205,43 @@ das Netz braucht, gehoert nie in eine Funktion, die offline geprueft wird —
 dieselbe Bewegung wie beim Thread-Riegel in Runde 12: eine Ebene hoeher, genau
 einmal.
 
+## Die elfte falsche Reparatur (Vorpruefung P1, Runde 14)
+
+Die erste, die NICHT „zu gruen" zeigt, sondern **zu rot** — und damit auf genau
+die Fehlerklasse, die dieser PR heilt.
+
+**11. Verlangen, dass ALLE Zeilen `**Completed**` tragen.** Die Reparatur aus
+Runde 9 war in der Richtung richtig (ein laufender Re-Review darf nicht durch
+eine alte gruene Zeile freigegeben werden), in der Form aber zu grob: bleibt ein
+**abgebrochener oder fehlgeschlagener** Lauf in der Tabelle stehen, holt ein
+spaeter erfolgreicher Re-Review das Tor nie mehr aus `pending`. Ein neuer
+Deadlock, gebaut beim Schliessen eines alten.
+
+Beides zugleich loest die **Aktualitaet**, nicht eine Liste von Statusworten:
+es entscheidet der **neueste Lauf am HEAD**, gemessen am Zeitstempel seiner
+Zeile. Sein `**Completed**` ersetzt aeltere terminale Versuche; ist er noch
+nicht fertig, bleibt es `pending`.
+
+⛔ Eine Statuswort-Liste waere die falsche Loesung gewesen, und zwar in beide
+Richtungen: eine Liste der laufenden Zustaende (`Running`, `Queued`, …) wird bei
+einem neuen Wort von Codex still zu gruen; eine Liste der terminalen Zustaende
+(`Failed`, `Cancelled`, …) wird bei einem neuen Wort wieder zum Deadlock von
+Runde 14. Der Zeitstempel braucht keine Liste.
+
+**Nachgemessen, bevor gebaut wurde** (05.09.2026, alle 37 aktiven Repos, je die
+100 juengsten Kommentare, Abruf und Auswertung getrennt): **73 echte
+Summary-Zeilen, jede einzelne mit `<relative-time datetime=…>` in UTC**, keine
+ohne. Der Zeitstempel ist damit belastbar und lexikalisch sortierbar. Eine Zeile
+ohne Zeitstempel bleibt trotzdem behandelt: sie laesst sich nicht einordnen und
+sperrt, sofern sie nicht selbst `**Completed**` traegt.
+
+**Die Regel dahinter:** Eine Korrektur darf nicht ins Gegenteil ueberschiessen.
+Wer „zu gruen" schliesst, muss pruefen, ob er dabei „zu rot" aufmacht — bei
+einem Tor sind beide Richtungen Ausfaelle, nur mit verschiedenen Opfern.
+
 ## Nachweis (§7)
 
-- `scripts/gate-2-verdict-selftest.sh` — **NEU**, 39 Proben, alle gruen.
+- `scripts/gate-2-verdict-selftest.sh` — **NEU**, 45 Proben, alle gruen.
   Zieht `eval_body()` **im Ganzen** aus der Workflow-Datei und fuehrt sie aus,
   statt sie abzuschreiben; deshalb kann er nicht gruen bleiben, wenn jemand die
   Datei zurueckdreht. Enthaelt neben den Body-Faellen Struktur-Proben, die nicht
@@ -226,13 +260,16 @@ einmal.
   der YAML gezogen und mit **gestelltem `gh`** ausgefuehrt — eindeutig →
   Kurzform erlaubt, fremde Aufloesung → voller SHA, Abruf gescheitert → voller
   SHA. Kein Netz.
-- **Gegen den alten Stand rot belegt: 18/39 gegen `origin/main`.** Jede
+- **Gegen den alten Stand rot belegt: 21/45 gegen `origin/main`.** Jede
   Erweiterung ist zusaetzlich gegen ihren DIREKTEN Vorgaenger rotgestellt,
   damit der Beleg nicht in der Masse untergeht: gegen `712ec11` genau die zwei
   neuen S3 und S5, gegen `dcf6169` genau die vier neuen Faelle V14-V16, gegen
-  `769b465` genau die acht neuen (V17, V18 und B1-B6). Die Gegenproben bleiben
-  dort jeweils gruen — „beide Review-Arten fertig" und „beide Laeufe fertig"
-  messen, dass die Fixture nicht generell kaputt ist.
+  `769b465` genau die acht neuen (V17, V18 und B1-B6), gegen `8608d19` genau
+  die zwei neuen V20/V21. Die Gegenproben bleiben dort jeweils gruen — „beide
+  Review-Arten fertig", „beide Laeufe fertig" und „Zeile ohne Zeitstempel, aber
+  fertig" messen, dass die Fixture nicht generell kaputt ist. V22-V25 bleiben
+  gegen `8608d19` ebenfalls gruen: die R14-Reparatur macht die R13-Richtung
+  nicht wieder auf.
   `git show <sha>:.github/workflows/gate-2-codex.yml > /tmp/alt.yml && GATE2_WORKFLOW=/tmp/alt.yml bash scripts/gate-2-verdict-selftest.sh`
 - `scripts/gate-2-threads-selftest.sh` — **NEU**, 20 Faelle, alle gruen. Zieht
   den Zaehl-Ausdruck ebenfalls **im Ganzen** aus der Workflow-Datei. Enthaelt

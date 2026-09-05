@@ -216,6 +216,67 @@ ZWEI_LAEUFE_FERTIG=$(printf '%s\n\n## Codex Review Summary\n\n| Review | Status 
 V=$(eval_body_0 "$ZWEI_LAEUFE_FERTIG")
 check "beide-laeufe-fertig→success (Gegenprobe)" success "$V"
 
+# --- V20-V25: DAS P1 AUS RUNDE 14 (die Gegenrichtung) ------------------------
+#
+# „Alle Zeilen muessen Completed sein" sperrt fuer immer, sobald ein
+# abgebrochener oder fehlgeschlagener Lauf stehenbleibt: ein spaeter
+# erfolgreicher Re-Review holt das Tor nie mehr aus `pending` — genau die
+# Fehlerklasse, die dieser PR heilt. Entscheidend ist deshalb der NEUESTE Lauf
+# am HEAD, gemessen am Zeitstempel der Zeile. An 73 echten Summary-Zeilen aus
+# 37 Repos (05.09.2026) traegt jede Code-Review-Zeile ein
+# `<relative-time datetime=…>` in UTC.
+
+# Eine Tabellenzeile; leerer Zeitstempel laesst das <relative-time>-Element weg.
+zeile_cr() { # $1=Status  $2=Zeitstempel (leer = keiner)
+  if [ -n "$2" ]; then
+    printf '| 📝 **Code Review** | %s <relative-time datetime="%s">x</relative-time> | `%s` | PR opened |\n' "$1" "$2" "$SHORT_SHA"
+  else
+    printf '| 📝 **Code Review** | %s | `%s` | PR opened |\n' "$1" "$SHORT_SHA"
+  fi
+}
+# Zwei Code-Review-Laeufe am SELBEN HEAD.
+summary2() { # $1=Status1 $2=TS1 $3=Status2 $4=TS2
+  printf '%s\n\n## Codex Review Summary\n\n| Review | Status | Commit | Review trigger |\n| --- | --- | --- | --- |\n' \
+    '<!-- codex-pull-request-review-summary -->'
+  zeile_cr "$1" "$2"
+  zeile_cr "$3" "$4"
+}
+
+FRUEH="2026-09-05T05:00:00.000000Z"
+SPAET="2026-09-05T06:00:00.000000Z"
+
+# V20) DER BEFUND: ein fehlgeschlagener Lauf steht noch da, der spaetere Lauf
+#      ist fertig. Das Tor muss aufgehen — sonst ein neuer Deadlock.
+V=$(eval_body_0 "$(summary2 '❌ **Failed**' "$FRUEH" '✅ **Completed**' "$SPAET")")
+check "alter-lauf-fehlgeschlagen+neuer-fertig→success (P1 R14)" success "$V"
+
+# V21) Dasselbe in umgekehrter Zeilenfolge — die Reihenfolge in der Tabelle ist
+#      nicht garantiert, entscheidend ist der Zeitstempel, nicht die Position.
+V=$(eval_body_0 "$(summary2 '✅ **Completed**' "$SPAET" '❌ **Failed**' "$FRUEH")")
+check "neuer-fertig+alter-fehlgeschlagen→success (P1 R14, Reihenfolge)" success "$V"
+
+# V22) Die Gegenrichtung bleibt zu (R13): der NEUESTE Lauf laeuft noch, ein
+#      alter ist fertig. Ohne diese Probe waere die R14-Reparatur ein
+#      Rueckschritt auf „irgendeine gruene Zeile genuegt".
+V=$(eval_body_0 "$(summary2 '✅ **Completed**' "$FRUEH" '🔄 **Running**' "$SPAET")")
+check "alter-fertig+neuer-laeuft→pending (R13 bleibt zu)" "" "$V"
+
+# V23) Und der neueste Lauf ist fehlgeschlagen: kein Urteil, `pending`. Der Weg
+#      heraus ist ein neuer Review, nicht ein gruenes Tor.
+V=$(eval_body_0 "$(summary2 '✅ **Completed**' "$FRUEH" '❌ **Failed**' "$SPAET")")
+check "alter-fertig+neuester-fehlgeschlagen→pending" "" "$V"
+
+# V24) Eine Zeile OHNE Zeitstempel laesst sich nicht einordnen. Traegt sie kein
+#      `**Completed**`, koennte sie der neueste Lauf sein → `pending`.
+V=$(eval_body_0 "$(summary2 '✅ **Completed**' "$SPAET" '🔄 **Running**' "")")
+check "zeile-ohne-zeitstempel-und-nicht-fertig→pending" "" "$V"
+
+# V25) Gegenprobe zu V24: dieselbe Lage, aber die Zeile ohne Zeitstempel ist
+#      fertig — dann blockiert nichts. Ohne sie koennte V24 auch dann gruen
+#      melden, wenn schon der fehlende Zeitstempel allein sperrt.
+V=$(eval_body_0 "$(summary2 '✅ **Completed**' "$SPAET" '✅ **Completed**' "")")
+check "zeile-ohne-zeitstempel-aber-fertig→success (Gegenprobe)" success "$V"
+
 echo "=== Abruf-Fehler darf nicht als 'null Befunde' gelten ==="
 
 # A1) Die Demonstration der Falle (Vorpruefung P1, Runde 4): der jq-Filter
