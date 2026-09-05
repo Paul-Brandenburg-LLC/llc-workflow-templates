@@ -181,6 +181,23 @@ pruefe "K12 Legacy-Banner im Review-Body + 1 offener Befund" \
 pruefe "K13 CHANGES_REQUESTED + Befundzahl unbekannt → pending" \
   pending "$(kette "$HEAD_SHA" CHANGES_REQUESTED "" "" "")"
 
+# K14 — DER BEFUND aus Runde 15: fuer die Legacy-Bodyformen ist der Vorab-Treffer
+# im Kommentar-Fallback die EINZIGE HEAD-Bindung (`eval_body()` prueft dort
+# keinen SHA). Steckt der Kurz-Praefix nur INNERHALB einer laengeren Hex-Folge,
+# nennt der Kommentar diesen HEAD nicht — das Banner darf nicht freigeben.
+LEGACY_EINGEBETTET="Codex Review: no findings
+geprueft an ff${SHORT_SHA}ff"
+pruefe "K14 Legacy-Banner + Kurz-SHA nur eingebettet → pending" \
+  pending "$(kette "" "" "" "$LEGACY_EINGEBETTET" 0)"
+
+# K15 — Gegenprobe zu K14: derselbe Body, aber mit dem Kurz-SHA als
+# eigenstaendiger Folge. Ohne sie meldete K14 auch dann gruen, wenn der
+# Kommentar-Fallback ueberhaupt nicht mehr erreicht wird.
+LEGACY_ECHT="Codex Review: no findings
+geprueft an ${SHORT_SHA}"
+pruefe "K15 Legacy-Banner + Kurz-SHA eigenstaendig → success (Gegenprobe)" \
+  success "$(kette "" "" "" "$LEGACY_ECHT" 0)"
+
 # ---------------------------------------------------------------------------
 # 2) Gegenprobe: die Fixture von K1 trifft den Befund wirklich
 # ---------------------------------------------------------------------------

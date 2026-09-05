@@ -277,6 +277,32 @@ check "zeile-ohne-zeitstempel-und-nicht-fertig→pending" "" "$V"
 V=$(eval_body_0 "$(summary2 '✅ **Completed**' "$SPAET" '✅ **Completed**' "")")
 check "zeile-ohne-zeitstempel-aber-fertig→success (Gegenprobe)" success "$V"
 
+# --- V26-V28: DAS P1 AUS RUNDE 15 --------------------------------------------
+#
+# Der SHA-Treffer haengt an der COMMIT-ZELLE, nicht an der Zeile. Steckt der
+# siebenstellige Praefix nur INNERHALB eines laengeren SHA (oder in der
+# Ausloeser-Spalte), nennt die Zeile diesen HEAD nicht — sonst uebernimmt ein
+# passend erzeugter neuer HEAD die Freigabe eines alten Laufs, genau an der
+# API-Aufloesung vorbei, die das verhindern soll.
+
+# V26) DER BEFUND: die Commit-Zelle traegt eine laengere Hex-Folge, in der der
+#      Kurz-Praefix nur eingebettet steckt.
+EINGEBETTET="ff${SHORT_SHA}ff"
+V=$(eval_body_0 "$(summary '✅ **Completed**' "$EINGEBETTET")")
+check "kurz-sha-nur-eingebettet-in-der-commit-zelle→pending (P1 R15)" "" "$V"
+
+# V27) Gegenprobe zu V26: dieselbe Zeile, aber die Commit-Zelle IST der
+#      Kurz-Praefix. Ohne sie meldete V26 auch dann gruen, wenn die Fixture
+#      generell nicht mehr traegt.
+V=$(eval_body_0 "$(summary '✅ **Completed**' "$SHORT_SHA")")
+check "kurz-sha-als-ganze-commit-zelle→success (Gegenprobe)" success "$V"
+
+# V28) Der Praefix steht in der AUSLOESER-Spalte, die Commit-Zelle ist fremd.
+FREMDZELLE=$(printf '%s\n\n## Codex Review Summary\n\n| Review | Status | Commit | Review trigger |\n| --- | --- | --- | --- |\n| 📝 **Code Review** | ✅ **Completed** <relative-time datetime="2026-09-05T06:00:00Z">x</relative-time> | `%s` | push %s |\n' \
+  '<!-- codex-pull-request-review-summary -->' "$FREMD_SHA" "$SHORT_SHA")
+V=$(eval_body_0 "$FREMDZELLE")
+check "praefix-nur-in-der-ausloeser-spalte→pending" "" "$V"
+
 echo "=== Abruf-Fehler darf nicht als 'null Befunde' gelten ==="
 
 # A1) Die Demonstration der Falle (Vorpruefung P1, Runde 4): der jq-Filter

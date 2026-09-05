@@ -239,9 +239,29 @@ sperrt, sofern sie nicht selbst `**Completed**` traegt.
 Wer „zu gruen" schliesst, muss pruefen, ob er dabei „zu rot" aufmacht — bei
 einem Tor sind beide Richtungen Ausfaelle, nur mit verschiedenen Opfern.
 
+## Die zwoelfte falsche Reparatur (Vorpruefung P1, Runde 15)
+
+**12. Den SHA in der ZEILE suchen statt in der Commit-ZELLE.** Die HEAD-Bindung
+war ein `grep -F` ueber die ganze Tabellenzeile. Enthielt der **volle** SHA
+eines alten, abgeschlossenen Laufs den siebenstelligen Praefix nur **intern**,
+uebernahm ein passend erzeugter neuer HEAD dessen Freigabe — genau an der
+API-Aufloesung aus Runde 13 vorbei, die das verhindern sollte. Ebenso haette der
+Praefix in der Ausloeser- oder Zeitstempel-Spalte genuegt.
+
+Gemessen wird jetzt **zellenweise**: die Zeile an `|` teilen, jede Zelle von
+Leerraum und Backticks befreien und auf **Gleichheit** pruefen. Dieselbe
+Bindung fehlte im Vorab-Treffer des Kommentar-Fallbacks (Zeile 698) — fuer die
+Legacy-Bodyformen ist das die EINZIGE HEAD-Bindung, weil `eval_body()` dort
+keinen SHA prueft. Dort steht jetzt eine Hex-Grenze
+(`(^|[^0-9a-fA-F])…([^0-9a-fA-F]|$)`) statt eines Teilstring-Treffers.
+
+**Die Regel dahinter:** Ein Bezeichner wird gegen ein **Feld** verglichen, nie
+gegen einen Text, in dem das Feld vorkommt. Eine Aufloesung eine Ebene hoeher
+nuetzt nichts, solange die Auswertung darunter noch als Teilstring sucht.
+
 ## Nachweis (§7)
 
-- `scripts/gate-2-verdict-selftest.sh` — **NEU**, 45 Proben, alle gruen.
+- `scripts/gate-2-verdict-selftest.sh` — **NEU**, 48 Proben, alle gruen.
   Zieht `eval_body()` **im Ganzen** aus der Workflow-Datei und fuehrt sie aus,
   statt sie abzuschreiben; deshalb kann er nicht gruen bleiben, wenn jemand die
   Datei zurueckdreht. Enthaelt neben den Body-Faellen Struktur-Proben, die nicht
@@ -260,12 +280,12 @@ einem Tor sind beide Richtungen Ausfaelle, nur mit verschiedenen Opfern.
   der YAML gezogen und mit **gestelltem `gh`** ausgefuehrt — eindeutig →
   Kurzform erlaubt, fremde Aufloesung → voller SHA, Abruf gescheitert → voller
   SHA. Kein Netz.
-- **Gegen den alten Stand rot belegt: 21/45 gegen `origin/main`.** Jede
+- **Gegen den alten Stand rot belegt: 22/48 gegen `origin/main`.** Jede
   Erweiterung ist zusaetzlich gegen ihren DIREKTEN Vorgaenger rotgestellt,
   damit der Beleg nicht in der Masse untergeht: gegen `712ec11` genau die zwei
   neuen S3 und S5, gegen `dcf6169` genau die vier neuen Faelle V14-V16, gegen
   `769b465` genau die acht neuen (V17, V18 und B1-B6), gegen `8608d19` genau
-  die zwei neuen V20/V21. Die Gegenproben bleiben dort jeweils gruen — „beide
+  die zwei neuen V20/V21, gegen `2463a77` genau V26 und V28. Die Gegenproben bleiben dort jeweils gruen — „beide
   Review-Arten fertig", „beide Laeufe fertig" und „Zeile ohne Zeitstempel, aber
   fertig" messen, dass die Fixture nicht generell kaputt ist. V22-V25 bleiben
   gegen `8608d19` ebenfalls gruen: die R14-Reparatur macht die R13-Richtung
@@ -281,15 +301,16 @@ einem Tor sind beide Richtungen Ausfaelle, nur mit verschiedenen Opfern.
   (Teil B2, `--paginate` + `$endCursor` + `pageInfo` + `jq -s`). Gegenproben
   gefahren und im Test verankert: die beiden verbotenen Pipe-Schreibweisen und
   drei bewusst falsche GraphQL-Fassungen schlagen weiter an.
-- `scripts/gate-2-chain-selftest.sh` — **NEU**, 17 Proben (die dreizehn Faelle
-  der Kette K1-K13 plus zwei Struktur- und zwei Gegenproben), alle gruen. Zieht den
+- `scripts/gate-2-chain-selftest.sh` — **NEU**, 19 Proben (die fuenfzehn Faelle
+  der Kette K1-K15 plus zwei Struktur- und zwei Gegenproben), alle gruen.
+  K14 ist gegen `2463a77` rot, die Gegenprobe K15 dort gruen. Zieht den
   KETTENBLOCK im Ganzen aus der Workflow-Datei (von `STATE=pending` bis vor die
   Zeile, die `state=` nach `GITHUB_OUTPUT` schreibt) und misst den erreichten
   `STATE`. Noetig, weil der Runde-6-Befund nicht in `eval_body()` lag, sondern in
   der Verzweigung darum herum — eine isolierte Funktionsprobe kann ihn
   strukturell nicht sehen.
   **Gegen den alten Stand rot belegt:** gegen `2ddd736` (vor dem elif-Fix)
-  2 Fehlschlaege (K1, K6), gegen `origin/main` 4 (K1, K5, K6, K8).
+  2 Fehlschlaege (K1, K6), gegen `origin/main` 9 (K1, K5, K6, K8, K10-K14).
   Die alte Kettenform steht als Literal im Test und belegt, dass die Fixture von
   K1 den fehlerhaften Pfad wirklich erreicht (`pending`) — mit Gegenprobe, dass
   sie nicht generell kaputt ist (`APPROVED` ergibt auch dort `success`).

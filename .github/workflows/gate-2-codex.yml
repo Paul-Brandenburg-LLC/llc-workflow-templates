@@ -621,7 +621,22 @@ jobs:
               # 37 Repos (05.09.2026) traegt JEDE Code-Review-Zeile ein
               # `<relative-time datetime=…>` in UTC — lexikalisch sortierbar.
               # Beweis: scripts/gate-2-verdict-selftest.sh (V17-V23).
-              ZEILEN="$(echo "$1" | grep -F -e "$HEAD_SHA" -e "$SHORT_SHA" | grep -F '**Code Review**' || true)"
+              # ⛔ Der SHA-Treffer haengt an der COMMIT-ZELLE, nicht an der
+              # Zeile (P1 Vorpruefung Runde 15). `grep -F` suchte den
+              # siebenstelligen Praefix irgendwo in der Zeile: enthielt der
+              # VOLLE SHA eines alten, abgeschlossenen Laufs den Praefix nur
+              # INTERN, uebernahm ein passend erzeugter neuer HEAD dessen
+              # Freigabe — an der API-Aufloesung im Step `Resolve PR HEAD`
+              # vorbei, die genau das verhindern soll. Ebenso haette der
+              # Praefix in der Ausloeser- oder Zeitstempel-Spalte genuegt.
+              # Deshalb zellenweise: die Zeile an `|` teilen, jede Zelle von
+              # Leerraum und Backticks befreien, auf GLEICHHEIT pruefen.
+              # Beweis: scripts/gate-2-verdict-selftest.sh (V26-V28).
+              ZEILEN="$(printf '%s\n' "$1" | grep -F '**Code Review**' | awk -v h="$HEAD_SHA" -v k="$SHORT_SHA" '
+                { n = split($0, sp, "|")
+                  for (i = 1; i <= n; i++) {
+                    z = sp[i]; gsub(/[[:space:]`]/, "", z)
+                    if (z == h || z == k) { print; break } } }' || true)"
               [ -n "$ZEILEN" ] || { echo ""; return; }
               # (1) Eine Zeile OHNE Zeitstempel laesst sich nicht einordnen.
               #     Traegt sie zudem kein `**Completed**`, ist sie nicht fertig
@@ -695,7 +710,14 @@ jobs:
             # CHANGES_REQUESTED / Body mit Verdict) bleibt dagegen verbindlich —
             # dann steht `STATE` nicht mehr auf `pending` und dieser Zweig laeuft
             # gar nicht erst.
-            if [ "$STATE" = pending ] && [ -n "$COMMENT_BODY" ] && echo "$COMMENT_BODY" | grep -qF -e "$HEAD_SHA" -e "$SHORT_SHA"; then
+            # ⛔ Auch dieser Vorab-Treffer muss eine EIGENSTAENDIGE Hex-Folge
+            # sein (P1 Vorpruefung Runde 15): steckt der Kurz-Praefix nur
+            # INNERHALB eines laengeren SHA, nennt der Kommentar diesen HEAD
+            # nicht. Fuer die Legacy-Bodyformen ist das die EINZIGE
+            # HEAD-Bindung — `eval_body()` prueft dort keinen SHA.
+            # Beweis: scripts/gate-2-chain-selftest.sh (K14/K15).
+            SHA_MUSTER='(^|[^0-9a-fA-F])('"$HEAD_SHA"'|'"$SHORT_SHA"')([^0-9a-fA-F]|$)'
+            if [ "$STATE" = pending ] && [ -n "$COMMENT_BODY" ] && printf '%s\n' "$COMMENT_BODY" | grep -qE "$SHA_MUSTER"; then
               V=$(eval_body "$COMMENT_BODY")
               [ "$V" = failure ] && { STATE=failure; DESC="Codex findings (comment@HEAD)"; }
               [ "$V" = success ] && { STATE=success; DESC="Codex comment (HEAD): no findings"; }
