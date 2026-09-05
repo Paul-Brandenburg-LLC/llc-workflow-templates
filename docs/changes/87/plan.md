@@ -79,11 +79,20 @@ getauscht.
 
 ## Nachweis (§7)
 
-- `scripts/gate-2-verdict-selftest.sh` — **NEU**, 29 Faelle, alle gruen.
+- `scripts/gate-2-verdict-selftest.sh` — **NEU**, 32 Faelle, alle gruen.
   Zieht `eval_body()` **im Ganzen** aus der Workflow-Datei und fuehrt sie aus,
   statt sie abzuschreiben; deshalb kann er nicht gruen bleiben, wenn jemand die
-  Datei zurueckdreht.
-- **Gegen den alten Stand rot belegt: 18/29.**
+  Datei zurueckdreht. Enthaelt fuenf Struktur-Proben, die nicht das Verhalten,
+  sondern die YAML-Bedingungen selbst messen: S1/S2 am Step `scope`
+  (ereignis-unabhaengig, `bot_exempt`-Waechter bleibt) und S3-S5 am `if` des
+  JOBS `bridge` (Recheck-Eingang da, Praedikat schlaegt auf der alten Fassung
+  an, PR-Waechter `issue.pull_request != null` + `issue.state == 'open'`
+  bleibt). Alle ziehen die Bedingung per `awk` aus der Datei und lassen
+  **Kommentarzeilen aus** — ueber dem `if` steht die Begruendung, und die
+  zitiert die alte Fassung woertlich; ein `grep` ueber die Rohdatei traefe sie.
+- **Gegen den alten Stand rot belegt: 19/32** (13 Fehlschlaege gegen
+  `origin/main`; gegen `712ec11`, den direkten Vorgaenger des Job-`if`-Fixes,
+  genau die zwei neuen S3 und S5).
   `git show <sha>:.github/workflows/gate-2-codex.yml > /tmp/alt.yml && GATE2_WORKFLOW=/tmp/alt.yml bash scripts/gate-2-verdict-selftest.sh`
 - `scripts/gate-2-threads-selftest.sh` — **NEU**, 20 Faelle, alle gruen. Zieht
   den Zaehl-Ausdruck ebenfalls **im Ganzen** aus der Workflow-Datei. Enthaelt

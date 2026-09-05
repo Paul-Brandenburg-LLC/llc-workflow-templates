@@ -273,5 +273,83 @@ else
   FAIL=$((FAIL+1))
 fi
 
+echo "=== Job-if: Recheck-Eingang (P1 Runde 9) ==="
+
+# S3-S5 teilen sich EINE Extraktion und EIN Praedikat.
+#
+# Der `if` des JOBS `bridge` ist ein Blockskalar (`>-`), sein Ausdruck steht
+# also ueber mehrere, tiefer eingerueckte Zeilen. Kommentarzeilen bleiben
+# ausgenommen: ueber dem `if` steht die Begruendung, und die zitiert die alte
+# Fassung dem Wortlaut nach. Ein `grep` ueber die Rohdatei traefe den
+# Begruendungstext und meldete falsch rot.
+JOB_IF=$(awk '
+  /^  bridge:[[:space:]]*$/ { injob=1; next }
+  !injob { next }
+  /^[[:space:]]*#/ { next }
+  collecting && /^      [^[:space:]]/ { print; next }
+  collecting { exit }
+  /^    if:/ { collecting=1; print; next }
+  /^    [a-zA-Z_-]+:/ { exit }
+' "$WF" | tr '\n' ' ')
+
+# Wachhund ueber der Extraktion: ein leerer oder abgeschnittener Treffer darf
+# NIE als bestandene Probe durchgehen. Beide Anker kommen in jeder denkbaren
+# Fassung des Ausdrucks vor - in der alten wie in der neuen.
+case "$JOB_IF" in
+  *github.event_name*issue_comment*) : ;;
+  *) echo "FATAL: if-Block des Jobs bridge nicht auffindbar in $WF (gelesen: $JOB_IF)"; exit 1 ;;
+esac
+
+# Das Praedikat, das S3 misst und S4 gegenprueft.
+bindet_kommentar_an_den_bot() {
+  printf '%s' "$1" | grep -q 'github\.event\.comment\.user\.login'
+}
+
+# Die alte Fassung woertlich (origin/main, vor diesem Fix) - nur fuer S4.
+ALT_IF="(github.event_name == 'pull_request') || (github.event_name == 'pull_request_review' && github.event.review.user.login == 'chatgpt-codex-connector[bot]') || (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && github.event.comment.user.login == 'chatgpt-codex-connector[bot]')"
+
+# S3) Der Job-`if` darf `issue_comment` NICHT mehr an den Kommentar-Autor
+#     binden. Das Tor steht bei offenen Codex-Befunden auf `failure`; das
+#     AUFLOESEN eines Threads erzeugt aber kein Actions-Ereignis
+#     (`pull_request_review_thread` gibt es nur als Webhook). Ohne einen
+#     Eingang, den ein MENSCH ausloesen kann, bliebe das Tor nach dem
+#     Aufloesen dauerhaft rot - derselbe Deadlock von der anderen Seite.
+#     Die Bruecke ist ein reiner Neuberechner, der Ausloeser aendert am
+#     Ergebnis nichts.
+if bindet_kommentar_an_den_bot "$JOB_IF"; then
+  echo "  FAIL [job-if-hat-recheck-eingang] → issue_comment haengt wieder am Kommentar-Autor: $JOB_IF"
+  FAIL=$((FAIL+1))
+else
+  echo "  ok   [job-if-hat-recheck-eingang]"
+  PASS=$((PASS+1))
+fi
+
+# S4) Gegenprobe zu S3: dasselbe Praedikat, auf die alte Fassung angewandt,
+#     MUSS anschlagen. Ohne sie meldete S3 auch dann gruen, wenn das Praedikat
+#     gar nichts mehr trifft - eine Probe, die nichts misst.
+if bindet_kommentar_an_den_bot "$ALT_IF"; then
+  echo "  ok   [job-if-gegenprobe-alte-fassung]"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL [job-if-gegenprobe-alte-fassung] → das Praedikat schlaegt nicht einmal auf der alten Fassung an; S3 misst nichts"
+  FAIL=$((FAIL+1))
+fi
+
+# S5) Der PR-Waechter muss bleiben. Ohne `issue.pull_request != null` liefe die
+#     Bruecke auf reinen Issues, ohne `issue.state == 'open'` auch an
+#     geschlossenen PRs - dort ist nichts mehr zu entscheiden. S3 allein liesse
+#     sich sonst durch ersatzloses Streichen der issue_comment-Bedingung
+#     "bestehen".
+S5_FEHLT=""
+printf '%s' "$JOB_IF" | grep -q 'github\.event\.issue\.pull_request != null' || S5_FEHLT="$S5_FEHLT issue.pull_request!=null"
+printf '%s' "$JOB_IF" | grep -q "github\.event\.issue\.state == 'open'" || S5_FEHLT="$S5_FEHLT issue.state=='open'"
+if [ -z "$S5_FEHLT" ]; then
+  echo "  ok   [job-if-behaelt-pr-waechter]"
+  PASS=$((PASS+1))
+else
+  echo "  FAIL [job-if-behaelt-pr-waechter] → fehlt:$S5_FEHLT"
+  FAIL=$((FAIL+1))
+fi
+
 echo "=== $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ] || exit 1
