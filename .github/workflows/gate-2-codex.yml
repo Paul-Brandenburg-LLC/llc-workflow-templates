@@ -394,49 +394,76 @@ jobs:
           COMMENT_BODY=$(gh api --paginate "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" 2>/dev/null \
             | jq -sr '(add // []) | [.[] | select(.user.login == "chatgpt-codex-connector[bot]")] | sort_by(.created_at) | last | .body // empty' 2>/dev/null || echo "")
 
-          # --- Offene Codex-ZEILENbefunde am HEAD (v1.9.0, llc-ops-backlog#87) ------
+          # --- Offene Codex-BEFUND-THREADS (v1.9.0, llc-ops-backlog#87) -------------
           # `Completed` in der Summary-Tabelle heisst nur "Lauf beendet", NICHT
           # "keine Befunde" — Codex-Vorpruefung P1, Runde 3, belegt an
           # llc-ops-backlog#1147: die Summary stand fuer `2293878` auf Completed,
           # waehrend gleichzeitig ein P2-Zeilenbefund offen war. Befunde stehen
-          # NICHT im Kommentar-Body, sondern als Review-Kommentare unter
-          # /pulls/N/comments — die diese Bruecke bisher nie gelesen hat.
+          # NICHT im Kommentar-Body, sondern als Review-Kommentare am Diff — die
+          # diese Bruecke bisher nie gelesen hat.
           #
-          # Gezaehlt werden nur TOP-LEVEL-Kommentare des Connectors OHNE Antwort:
-          # ein beantworteter Befund gilt als abgearbeitet (`in_reply_to_id` zeigt
-          # auf den Elternkommentar). Ohne diese Einschraenkung bliebe ein einmal
-          # erledigter Befund ewig blockierend — die `commit_id` von
-          # Review-Kommentaren wandert beim Push auf den neuen HEAD mit.
+          # ⛔ Gezaehlt wird der ECHTE Thread-Zustand `isResolved`, NICHT das
+          # Vorhandensein einer ANTWORT (Vorpruefung P1, Runde 5). Die fruehere
+          # Fassung las `/pulls/N/comments` und strich jeden Befund, auf den
+          # irgendein `in_reply_to_id` zeigte. Eine Antwort belegt aber nur, dass
+          # jemand geschrieben hat — nicht, dass der Befund erledigt ist: ein
+          # widersprechender Kommentar des PR-Autors haette den Befund aus der
+          # Zaehlung entfernt und das Tor bei `Completed` auf `success` gesetzt.
+          # `isResolved` setzt dagegen nur, wer den Thread wirklich aufloest — es
+          # ist derselbe Zustand, den die Branch-Protection mit
+          # "All comments must be resolved" verlangt.
           #
-          # `--paginate` + `jq -s` mit `(add // [])` sind Pflicht (siehe oben, v1.6.2).
+          # Damit entfaellt auch der HEAD-Filter: ein offener Thread blockiert,
+          # gleich an welchem Commit er haengt. Das ist Absicht — die `commit_id`
+          # von Review-Kommentaren wandert beim Push ohnehin auf den neuen HEAD mit,
+          # und die Irrtumsrichtung soll auf "zu vorsichtig" zeigen, nie auf
+          # "zu gruen".
+          #
+          # `--paginate` ist auch bei GraphQL Pflicht: die Verbindung liefert nur
+          # `first: 100` je Seite. Dafuer MUSS die Variable `$endCursor` heissen und
+          # `pageInfo { hasNextPage endCursor }` abgefragt werden — nur dann blaettert
+          # `gh` ueberhaupt weiter. Die Seiten kommen als EINZELNE Dokumente an und
+          # werden mit `jq -s` zusammengefuehrt (siehe v1.6.2 oben).
+          # Beweis: scripts/gate-2-threads-selftest.sh + Teil B2 des Paginate-Waechters.
           #
           # ⛔ ABRUF UND AUSWERTUNG MUESSEN GETRENNT SEIN (Vorpruefung P1, Runde 4).
           # Als eine Pipe geschrieben — `gh api … | jq …` — ist der Fehlerfall
-          # STILL: scheitert `gh api`, bekommt `jq` leere Eingabe, `(add // [])`
-          # macht daraus `[]` und `length` liefert `0`. `jq` endet mit 0, ein
-          # nachgestelltes `|| echo ""` feuert also NIE — und "0 offene Befunde"
-          # ist genau die Aussage, die ein abgeschlossenes Summary auf `success`
-          # setzt. Eine leere Antwort ist kein Beleg fuer Abwesenheit.
+          # STILL: scheitert `gh api`, bekommt `jq` leere Eingabe und `length`
+          # liefert `0`. `jq` endet mit 0, ein nachgestelltes `|| echo ""` feuert
+          # also NIE — und "0 offene Befunde" ist genau die Aussage, die ein
+          # abgeschlossenes Summary auf `success` setzt. Eine leere Antwort ist kein
+          # Beleg fuer Abwesenheit.
           # Deshalb: erst abrufen und den Exitcode pruefen, dann auswerten.
           # Scheitert eines von beidem, bleibt der Wert LEER = "unbekannt" und das
           # Gate bleibt `pending`. Leer darf NIE als "null Befunde" gelesen werden.
           CODEX_OFFEN=""
-          if COMMENTS_RAW=$(gh api --paginate "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" 2>"$RUNNER_TEMP/codex-comments.err"); then
-            CODEX_OFFEN=$(printf '%s' "$COMMENTS_RAW" | jq -s --arg head "$HEAD_SHA" '
-                (add // []) as $all
-                | ($all | map(select(.in_reply_to_id != null) | .in_reply_to_id) | unique) as $beantwortet
-                | [ $all[]
-                    | select(.user.login == "chatgpt-codex-connector[bot]")
-                    | select(.commit_id == $head)
-                    | select(.in_reply_to_id == null)
-                    | select([.id] | inside($beantwortet) | not) ]
+          if THREADS_RAW=$(gh api graphql --paginate -F owner="${GITHUB_REPOSITORY%%/*}" -F repo="${GITHUB_REPOSITORY#*/}" -F pr="$PR_NUMBER" -f query='
+                query($owner: String!, $repo: String!, $pr: Int!, $endCursor: String) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $pr) {
+                      reviewThreads(first: 100, after: $endCursor) {
+                        pageInfo { hasNextPage endCursor }
+                        nodes {
+                          isResolved
+                          comments(first: 1) { nodes { author { login } } }
+                        }
+                      }
+                    }
+                  }
+                }' 2>"$RUNNER_TEMP/codex-threads.err"); then
+            CODEX_OFFEN=$(printf '%s' "$THREADS_RAW" | jq -s '
+                [ .[] | .data.repository.pullRequest.reviewThreads.nodes[]? ]
+                | [ .[]
+                    | select(.isResolved == false)
+                    | select(((((.comments.nodes[0] // {}).author // {}).login // "")
+                              | sub("\\[bot\\]$"; "")) == "chatgpt-codex-connector") ]
                 | length' 2>/dev/null || echo "")
           else
-            echo "::warning::Codex-Zeilenbefunde nicht abrufbar — Gate bleibt pending. $(head -c 200 "$RUNNER_TEMP/codex-comments.err" 2>/dev/null)"
+            echo "::warning::Codex-Befund-Threads nicht abrufbar — Gate bleibt pending. $(head -c 200 "$RUNNER_TEMP/codex-threads.err" 2>/dev/null)"
           fi
           case "$CODEX_OFFEN" in ''|*[!0-9]*) CODEX_OFFEN="" ;; esac
-          [ -n "$CODEX_OFFEN" ] || echo "::warning::Codex-Zeilenbefunde unbekannt (Abruf oder Auswertung gescheitert) — Gate bleibt pending"
-          echo "Offene Codex-Zeilenbefunde am HEAD: ${CODEX_OFFEN:-unbekannt}"
+          [ -n "$CODEX_OFFEN" ] || echo "::warning::Codex-Befund-Threads unbekannt (Abruf oder Auswertung gescheitert) — Gate bleibt pending"
+          echo "Offene Codex-Befund-Threads: ${CODEX_OFFEN:-unbekannt}"
 
           STATE=pending
           DESC="Awaiting Codex review for current HEAD"
@@ -459,11 +486,11 @@ jobs:
           # `**Completed**` traegt, ist ein Urteil. Alles andere bleibt `pending` —
           # die Irrtumsrichtung zeigt damit auf „zu vorsichtig", nie auf „zu gruen".
           # Beweis: scripts/gate-2-verdict-selftest.sh (Faelle V1-V9).
-          eval_body() {  # $1=body  $2=offene Zeilenbefunde am HEAD (leer=unbekannt)
+          eval_body() {  # $1=body  $2=offene Codex-Befund-Threads (leer=unbekannt)
                          #   → echoes success|failure|"" (kein erkennbares Verdict)
             if echo "$1" | grep -qE '### Integrations-Befunde|### Findings|🚨|\*\*P[01]\*\*'; then echo failure
             elif echo "$1" | grep -qF '<!-- codex-pull-request-review-summary -->'; then
-              # $2 = offene Codex-Zeilenbefunde am HEAD (Zahl; LEER = unbekannt).
+              # $2 = offene (nicht aufgeloeste) Codex-Befund-Threads (Zahl; LEER = unbekannt).
               # Reihenfolge: unbekannt schlaegt alles, dann Befunde, dann der
               # abgeschlossene Lauf. "Completed" allein ist KEIN Freigabesignal.
               if [ -z "${2:-}" ]; then echo ""

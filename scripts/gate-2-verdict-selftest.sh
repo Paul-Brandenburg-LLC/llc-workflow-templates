@@ -30,9 +30,9 @@
 #   (P1, Runde 3) `**Completed**` als Freigabe lesen. Das heisst nur „Lauf
 #   beendet", NICHT „keine Befunde": an llc-ops-backlog#1147 stand die Summary
 #   fuer `2293878` auf Completed, waehrend sechs Zeilenbefunde offen waren.
-#   Befunde stehen NICHT im Kommentar-Body, sondern unter /pulls/N/comments —
+#   Befunde stehen NICHT im Kommentar-Body, sondern als Review-Threads am Diff —
 #   die Bruecke hat sie nie gelesen. Deshalb bekommt `eval_body()` die Zahl der
-#   OFFENEN (unbeantworteten) Zeilenbefunde am HEAD als zweites Argument.
+#   OFFENEN (nicht aufgeloesten) Befund-Threads als zweites Argument.
 #   Faelle V10-V13.
 #
 # Die Funktion `eval_body()` wird AUS DER WORKFLOW-DATEI GELESEN und hier
@@ -203,7 +203,11 @@ if [ -z "$OFFEN_BLOCK" ]; then
   FAIL=$((FAIL+3))
 else
 
-if printf '%s' "$OFFEN_BLOCK" | grep -q 'if COMMENTS_RAW='; then
+# Gemessen wird die ZUSAGE, nicht der Variablenname: der Abruf steht in einer
+# eigenen Zuweisung, deren Exitcode die `if`-Bedingung ist. (Der Name hing hier
+# einmal fest auf `COMMENTS_RAW` und machte die Probe rot, als der Abruf auf
+# GraphQL wechselte — der Name ist nicht die Zusage.)
+if printf '%s' "$OFFEN_BLOCK" | grep -qE '^[[:space:]]*if [A-Z][A-Z0-9_]*=\$\(gh api'; then
   echo "  ok   [abruf-exitcode-wird-geprueft]"; PASS=$((PASS+1))
 else
   echo "  FAIL [abruf-exitcode-wird-geprueft] → gh api haengt ungeprueft an jq"; FAIL=$((FAIL+1))
@@ -213,9 +217,19 @@ fi
 #     laufen — samt ihrer Backslash-Fortsetzungen. Nur die eigene Anweisung
 #     zaehlt: dass die FOLGE-Anweisung die Variable durch `jq -s` schickt, ist
 #     genau der gewollte Zustand und darf hier nicht als Verstoss gelten.
-GH_ANWEISUNG="$(printf '%s\n' "$OFFEN_BLOCK" | awk '
-  /gh api --paginate/ { z=$0; while (z ~ /\\[[:space:]]*$/ && (getline n) > 0) { sub(/\\[[:space:]]*$/, "", z); z = z " " n }
-                        print z; exit }')"
+# Die Anweisung endet nicht zwangslaeufig am Zeilenende: ein GraphQL-Query steht
+# als mehrzeiliger `-f query='…'`-String da, ganz ohne Backslash-Fortsetzungen.
+# Zusammengezogen wird deshalb, solange die Zeile fortgesetzt wird ODER noch ein
+# Apostroph offen steht — sonst sieht die Probe nur die erste Zeile und ein
+# nachgestelltes `| jq` bliebe unentdeckt.
+GH_ANWEISUNG="$(printf '%s\n' "$OFFEN_BLOCK" | awk -v q="'" '
+  function apo(s,   c, i) { c = 0; for (i = 1; i <= length(s); i++) if (substr(s, i, 1) == q) c++; return c }
+  /gh api/ && /--paginate/ {
+    z = $0
+    while ((z ~ /\\[[:space:]]*$/ || apo(z) % 2 == 1) && (getline n) > 0) {
+      sub(/\\[[:space:]]*$/, "", z); z = z " " n
+    }
+    print z; exit }')"
 if [ -z "$GH_ANWEISUNG" ]; then
   echo "  FAIL [kein-direkter-pipe-gh-nach-jq] → gh-api-Anweisung nicht auffindbar"; FAIL=$((FAIL+1))
 elif printf '%s' "$GH_ANWEISUNG" | grep -q '| *jq'; then
