@@ -92,6 +92,33 @@ jobs:
           set -euo pipefail
           SHA=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+          # --- Kurz-SHA nur, wenn er EINDEUTIG auf diesen HEAD zeigt -------
+          # (v1.9.0, Vorpruefung P1 Runde 13) Die HEAD-Bindung akzeptiert
+          # unten auch die Kurzform, weil Codex die Commit-Zelle der Summary
+          # siebenstellig schreibt (am 2026-09-05 an llc-ops-backlog#1147
+          # nachgemessen: `2293878`). Die Kurzform ersatzlos zu streichen
+          # waere deshalb ein NEUER Deadlock — davon hat dieser Fix schon
+          # zwei geheilt.
+          # Sieben Hex-Zeichen sind aber nur 28 Bit: ein PR-Autor kann einen
+          # neuen Commit mit demselben Praefix wie ein bereits abgeschlossener
+          # Review-Commit erzeugen und dessen Freigabe uebernehmen.
+          # Deshalb wird der Praefix hier GENAU EINMAL aufgeloest — eine Ebene
+          # ueber der Auswertung, weil `eval_body()` offline aus der YAML
+          # gezogen und ausgefuehrt wird und kein Netz sehen darf.
+          # Abruf und Auswertung getrennt, Exitcode als Bedingung: loest der
+          # Praefix nicht genau auf diesen HEAD auf (mehrdeutig, unbekannt,
+          # Abruf gescheitert), faellt die Bindung auf den VOLLEN SHA zurueck.
+          # ⛔ NICHT auf leer: ein leeres Muster in `grep -F -e ""` traefe
+          # JEDE Zeile und machte das Tor maximal gruen — genau die falsche
+          # Irrtumsrichtung.
+          # Beweis: scripts/gate-2-verdict-selftest.sh (B1-B5).
+          SHORT="$SHA"
+          KURZ="${SHA:0:7}"
+          if AUFGELOEST=$(gh api "/repos/$GITHUB_REPOSITORY/commits/$KURZ" --jq .sha 2>/dev/null); then
+            if [ "$AUFGELOEST" = "$SHA" ]; then SHORT="$KURZ"; fi
+          fi
+          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
           # --- Bot-PR-Konklusivitaets-Pflicht (PB LLC §3.4 v7.1.0; Klassen-Gate v1.8.0) ---
           # Governance-Gates enden auf Bot-PRs konklusiv mit success (bot-exempt) —
           # ein skipped/ewig-pending Required-Check haelt den Merge-Knopf fuer immer zu
@@ -379,12 +406,17 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
           HEAD_SHA: ${{ steps.head.outputs.sha }}
+          SHORT_SHA: ${{ steps.head.outputs.short }}
         run: |
           set -euo pipefail
           # --- HEAD-Bindung (v7.0.0): ein Codex-Verdict zählt NUR, wenn es den aktuellen
           # HEAD betraf. Ohne diese Prüfung wird ein "APPROVED" von Commit A auf einen
           # neuen, ungeprüften Commit B übertragen (Stale-Approval-Loch, Audit-Befund). ---
-          SHORT_SHA="${HEAD_SHA:0:7}"
+          # SHORT_SHA kommt aus dem Step `Resolve PR HEAD` und ist DORT schon
+          # gegen den vollen SHA geprueft (P1 Runde 13). Hier wird er nur noch
+          # gegen LEER abgesichert: ein leeres `-e`-Muster traefe in `grep -F`
+          # jede Zeile. Vorgabe ist deshalb der volle SHA, nie die leere Zeichenkette.
+          [ -n "${SHORT_SHA:-}" ] || SHORT_SHA="$HEAD_SHA"
 
           # --- Vollstaendigkeits-Pflicht (v1.6.2, Befund geheimtreffen-site#107) --------
           # (1) BEIDE Abfragen MUESSEN `--paginate` tragen. Ohne das liefert die REST-API
@@ -548,6 +580,7 @@ jobs:
             #    Kette. ⛔ Ihn hier wieder einzubauen waere ein Rueckschritt:
             #    dann gaebe es zwei Wahrheiten, die auseinanderlaufen koennen.
             #
+            local ZEILEN GESAMT FERTIG
             # (a) Befund-Marker im Body schlagen alles.
             if echo "$1" | grep -qE '### Integrations-Befunde|### Findings|🚨|\*\*P[01]\*\*'; then echo failure; return; fi
             # (b) Sonst entscheidet die Form des Bodys.
@@ -562,7 +595,28 @@ jobs:
               #   - `**Completed**`.
               # Fehlt eines davon, bleibt es `pending` — die Irrtumsrichtung
               # zeigt auf "zu vorsichtig", nie auf "zu gruen".
-              if echo "$1" | grep -F -e "$HEAD_SHA" -e "$SHORT_SHA" | grep -F '**Code Review**' | grep -qF '**Completed**'; then echo success
+              # (P1, Vorpruefung Runde 13) ZAEHLEN statt SUCHEN.
+              # Die Summary traegt je Review-LAUF eine eigene Zeile. Nach
+              # einem erneut angestossenen Review steht neben dem alten
+              # `Completed` ein neues `Running` — fuer DENSELBEN HEAD. Ein
+              # `grep -q '**Completed**'` fand die alte Zeile und gab frei,
+              # waehrend der neue Lauf noch lief; es konnte waehrend eines
+              # laufenden Re-Reviews gemergt werden.
+              # "Es gibt eine gruene Zeile" ist nie dasselbe wie "es gibt
+              # keine ungruene Zeile" — derselbe Denkfehler wie in Runde 11,
+              # dort ueber Review-ARTEN, hier ueber mehrere LAEUFE derselben
+              # Art. Deshalb: alle Code-Review-Zeilen zum HEAD einsammeln und
+              # die Gesamtzahl gegen die Zahl der fertigen halten. Sobald EINE
+              # davon nicht `**Completed**` traegt, bleibt es `pending`.
+              # Beweis: scripts/gate-2-verdict-selftest.sh (V17/V18).
+              ZEILEN="$(echo "$1" | grep -F -e "$HEAD_SHA" -e "$SHORT_SHA" | grep -F '**Code Review**' || true)"
+              [ -n "$ZEILEN" ] || { echo ""; return; }
+              GESAMT="$(printf '%s\n' "$ZEILEN" | grep -cF '**Code Review**' || true)"
+              FERTIG="$(printf '%s\n' "$ZEILEN" | grep -cF '**Completed**' || true)"
+              # Nicht zaehlbar ist kein Urteil — Irrtumsrichtung "zu vorsichtig".
+              case "$GESAMT" in ''|*[!0-9]*) echo ""; return;; esac
+              case "$FERTIG" in ''|*[!0-9]*) echo ""; return;; esac
+              if [ "$GESAMT" -ge 1 ] && [ "$GESAMT" -eq "$FERTIG" ]; then echo success
               else echo ""; fi
             elif echo "$1" | grep -qE '^### 💡 Codex Review|^### Codex Review|^Codex Review: '; then echo success
             else echo ""; fi

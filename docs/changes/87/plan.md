@@ -170,25 +170,69 @@ Messung nicht ins Leere greift.
 Sorgfalt zu klein, sondern die Stelle falsch. Ein geteilter Zustand wandert
 eine Ebene hoeher — und dorthin gehoert dann ein Waechter, kein Kommentar.
 
+## Die neunte und zehnte falsche Reparatur (Vorpruefung P1, Runde 13)
+
+**9. „Es gibt eine gruene Zeile" ist nie „es gibt keine ungruene Zeile".**
+Die Summary-Tabelle traegt nicht nur je Review-ART eine Zeile (Runde 11),
+sondern auch je **Lauf**: wird ein Review erneut angestossen, steht neben dem
+alten `**Completed**` ein neues `**Running**` — fuer DENSELBEN HEAD und
+dieselbe Art. Die Pruefung suchte irgendeine passende gruene Zeile und fand die
+alte; waehrend des neuen Reviews war der Merge frei. Gemessen wird jetzt
+zeilenweise **gezaehlt**, nicht gesucht: alle Code-Review-Zeilen zum HEAD
+einsammeln, Gesamtzahl gegen die Zahl der fertigen halten. Traegt eine davon
+nicht `**Completed**`, bleibt es `pending`.
+
+**10. Sieben Hex-Zeichen sind kein Ausweis.** Die HEAD-Bindung akzeptierte den
+siebenstelligen Kurz-Hash. Das sind 28 Bit: ein PR-Autor kann einen neuen
+Commit mit demselben Praefix wie ein bereits abgeschlossener Review-Commit
+erzeugen und dessen Freigabe uebernehmen.
+Die Kurzform ersatzlos zu streichen waere die naheliegende, aber falsche
+Reparatur gewesen — **Codex schreibt die Commit-Zelle kurz** (am 05.09.2026 an
+`llc-ops-backlog#1147` nachgemessen: `` `2293878` ``); das Tor stuende danach
+dauerhaft auf `pending`, also ein neuer Deadlock, und davon heilt dieser Fix
+schon zwei. Ebenso falsch waere ein API-Aufruf in `eval_body()`: die Funktion
+wird offline aus der YAML gezogen und ausgefuehrt, ein Netzaufruf darin bricht
+jede Probe.
+Der Kurz-Hash wird deshalb **eine Ebene hoeher** aufgeloest, im Step
+`Resolve PR HEAD`, genau einmal, und `eval_body()` bekommt nur noch einen Wert,
+dem es trauen darf. Loest der Praefix nicht eindeutig auf genau diesen HEAD auf
+— mehrdeutig, unbekannt, Abruf gescheitert —, faellt die Bindung auf den
+**vollen** SHA zurueck. ⛔ Nicht auf leer: ein leeres Muster in
+`grep -F -e ""` traefe jede Zeile und machte das Tor maximal gruen.
+
+**Die Regel dahinter:** Bei einer Tabelle zaehlt man, statt zu suchen. Und was
+das Netz braucht, gehoert nie in eine Funktion, die offline geprueft wird —
+dieselbe Bewegung wie beim Thread-Riegel in Runde 12: eine Ebene hoeher, genau
+einmal.
+
 ## Nachweis (§7)
 
-- `scripts/gate-2-verdict-selftest.sh` — **NEU**, 37 Faelle, alle gruen.
+- `scripts/gate-2-verdict-selftest.sh` — **NEU**, 39 Proben, alle gruen.
   Zieht `eval_body()` **im Ganzen** aus der Workflow-Datei und fuehrt sie aus,
   statt sie abzuschreiben; deshalb kann er nicht gruen bleiben, wenn jemand die
-  Datei zurueckdreht. Enthaelt fuenf Struktur-Proben, die nicht das Verhalten,
-  sondern die YAML-Bedingungen selbst messen: S1/S2 am Step `scope`
-  (ereignis-unabhaengig, `bot_exempt`-Waechter bleibt) und S3-S5 am `if` des
-  JOBS `bridge` (Recheck-Eingang da, Praedikat schlaegt auf der alten Fassung
-  an, PR-Waechter `issue.pull_request != null` + `issue.state == 'open'`
-  bleibt). Alle ziehen die Bedingung per `awk` aus der Datei und lassen
-  **Kommentarzeilen aus** — ueber dem `if` steht die Begruendung, und die
-  zitiert die alte Fassung woertlich; ein `grep` ueber die Rohdatei traefe sie.
-- **Gegen den alten Stand rot belegt: 20/37** (17 Fehlschlaege gegen
-  `origin/main`). Jede Erweiterung ist zusaetzlich gegen ihren DIREKTEN
-  Vorgaenger rotgestellt, damit der Beleg nicht in der Masse untergeht: gegen
-  `712ec11` genau die zwei neuen S3 und S5, gegen `dcf6169` genau die vier
-  neuen Faelle V14-V16 (die Gegenprobe „beide Review-Arten fertig" bleibt dort
-  gruen — sie misst, dass die Fixture nicht generell kaputt ist).
+  Datei zurueckdreht. Enthaelt neben den Body-Faellen Struktur-Proben, die nicht
+  das Verhalten, sondern die YAML selbst messen: S1/S2 am Step `scope`
+  (ereignis-unabhaengig, `bot_exempt`-Waechter bleibt), S3-S5 am `if` des JOBS
+  `bridge` (Recheck-Eingang da, Praedikat schlaegt auf der alten Fassung an,
+  PR-Waechter `issue.pull_request != null` + `issue.state == 'open'` bleibt),
+  S6/S7 an der Kette (kein `STATE=success` vor dem `CODEX_OFFEN`-Riegel, mit
+  Gegenprobe an der alten Anordnung) und B1/B5/B6 an der Kurz-SHA-Aufloesung
+  (Abruf getrennt geprueft, Vorgabe ist der volle SHA, der Urteils-Step nimmt
+  den geprueften Wert statt neu zu rechnen). Alle ziehen die Bedingung per
+  `awk` aus der Datei und lassen **Kommentarzeilen aus** — ueber dem `if` steht
+  die Begruendung, und die zitiert die alte Fassung woertlich; ein `grep` ueber
+  die Rohdatei traefe sie.
+  B2-B4 sind Verhaltensproben: der Aufloesungs-Block wird wie `eval_body()` aus
+  der YAML gezogen und mit **gestelltem `gh`** ausgefuehrt — eindeutig →
+  Kurzform erlaubt, fremde Aufloesung → voller SHA, Abruf gescheitert → voller
+  SHA. Kein Netz.
+- **Gegen den alten Stand rot belegt: 18/39 gegen `origin/main`.** Jede
+  Erweiterung ist zusaetzlich gegen ihren DIREKTEN Vorgaenger rotgestellt,
+  damit der Beleg nicht in der Masse untergeht: gegen `712ec11` genau die zwei
+  neuen S3 und S5, gegen `dcf6169` genau die vier neuen Faelle V14-V16, gegen
+  `769b465` genau die acht neuen (V17, V18 und B1-B6). Die Gegenproben bleiben
+  dort jeweils gruen — „beide Review-Arten fertig" und „beide Laeufe fertig"
+  messen, dass die Fixture nicht generell kaputt ist.
   `git show <sha>:.github/workflows/gate-2-codex.yml > /tmp/alt.yml && GATE2_WORKFLOW=/tmp/alt.yml bash scripts/gate-2-verdict-selftest.sh`
 - `scripts/gate-2-threads-selftest.sh` — **NEU**, 20 Faelle, alle gruen. Zieht
   den Zaehl-Ausdruck ebenfalls **im Ganzen** aus der Workflow-Datei. Enthaelt
@@ -200,8 +244,8 @@ eine Ebene hoeher — und dorthin gehoert dann ein Waechter, kein Kommentar.
   (Teil B2, `--paginate` + `$endCursor` + `pageInfo` + `jq -s`). Gegenproben
   gefahren und im Test verankert: die beiden verbotenen Pipe-Schreibweisen und
   drei bewusst falsche GraphQL-Fassungen schlagen weiter an.
-- `scripts/gate-2-chain-selftest.sh` — **NEU**, 13 Proben (die neun Faelle der
-  Kette plus zwei Struktur- und zwei Gegenproben), alle gruen. Zieht den
+- `scripts/gate-2-chain-selftest.sh` — **NEU**, 17 Proben (die dreizehn Faelle
+  der Kette K1-K13 plus zwei Struktur- und zwei Gegenproben), alle gruen. Zieht den
   KETTENBLOCK im Ganzen aus der Workflow-Datei (von `STATE=pending` bis vor die
   Zeile, die `state=` nach `GITHUB_OUTPUT` schreibt) und misst den erreichten
   `STATE`. Noetig, weil der Runde-6-Befund nicht in `eval_body()` lag, sondern in

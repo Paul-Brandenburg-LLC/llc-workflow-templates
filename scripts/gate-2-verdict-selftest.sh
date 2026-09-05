@@ -186,6 +186,36 @@ ZWEI_FERTIG=$(printf '%s\n\n## Codex Review Summary\n\n| Review | Status | Commi
 V=$(eval_body_0 "$ZWEI_FERTIG")
 check "beide-review-arten-fertig→success (Gegenprobe)" success "$V"
 
+# --- V17: DAS P1-LOCH AUS RUNDE 13 -------------------------------------------
+
+# V17) Die Summary traegt je Review-LAUF eine eigene Zeile. Wird ein Review
+#      erneut angestossen (Push, "@codex review"), steht neben dem alten
+#      `Completed` ein neues `Running` — fuer DENSELBEN HEAD und dieselbe
+#      Review-ART. Die alte Pruefung suchte irgendeine gruene Zeile und gab
+#      frei, waehrend der neue Lauf noch lief: es konnte waehrend eines
+#      laufenden Re-Reviews gemergt werden.
+#      "Es gibt eine gruene Zeile" ist nie dasselbe wie "es gibt keine ungruene".
+ZWEI_LAEUFE=$(printf '%s\n\n## Codex Review Summary\n\n| Review | Status | Commit |\n| --- | --- | --- |\n| 📝 **Code Review** | ✅ **Completed** | `%s` | \n| 📝 **Code Review** | 🔄 **Running** | `%s` | \n' \
+  '<!-- codex-pull-request-review-summary -->' "$SHORT_SHA" "$SHORT_SHA")
+V=$(eval_body_0 "$ZWEI_LAEUFE")
+check "alter-lauf-fertig+neuer-laeuft-am-HEAD→pending (P1 R13)" "" "$V"
+
+# V18) Dieselbe Lage in umgekehrter Reihenfolge. Die Zeilenfolge in der Tabelle
+#      ist nicht garantiert; eine Pruefung, die nur die erste Zeile ansieht,
+#      waere hier gruen und bei V17 rot (oder umgekehrt).
+ZWEI_LAEUFE_UMGEKEHRT=$(printf '%s\n\n## Codex Review Summary\n\n| Review | Status | Commit |\n| --- | --- | --- |\n| 📝 **Code Review** | 🔄 **Running** | `%s` | \n| 📝 **Code Review** | ✅ **Completed** | `%s` | \n' \
+  '<!-- codex-pull-request-review-summary -->' "$SHORT_SHA" "$SHORT_SHA")
+V=$(eval_body_0 "$ZWEI_LAEUFE_UMGEKEHRT")
+check "neuer-laeuft+alter-fertig-am-HEAD→pending (P1 R13, Reihenfolge)" "" "$V"
+
+# V19) Gegenprobe zu V17/V18: sind BEIDE Laeufe am HEAD fertig, traegt die
+#      Summary. Ohne sie koennten V17/V18 auch bei einer generell kaputten
+#      Fixture oder einer Funktion, die NIE success liefert, gruen melden.
+ZWEI_LAEUFE_FERTIG=$(printf '%s\n\n## Codex Review Summary\n\n| Review | Status | Commit |\n| --- | --- | --- |\n| 📝 **Code Review** | ✅ **Completed** | `%s` | \n| 📝 **Code Review** | ✅ **Completed** | `%s` | \n' \
+  '<!-- codex-pull-request-review-summary -->' "$SHORT_SHA" "$SHORT_SHA")
+V=$(eval_body_0 "$ZWEI_LAEUFE_FERTIG")
+check "beide-laeufe-fertig→success (Gegenprobe)" success "$V"
+
 echo "=== Abruf-Fehler darf nicht als 'null Befunde' gelten ==="
 
 # A1) Die Demonstration der Falle (Vorpruefung P1, Runde 4): der jq-Filter
@@ -402,6 +432,93 @@ if [ "$S7" = 1 ]; then
 else
   echo "  FAIL [gegenprobe-alte-anordnung-schlaegt-an] → rc=$S7; die Messung trifft die alte Anordnung nicht"
   FAIL=$((FAIL+1))
+fi
+
+echo "=== Kurz-SHA-Bindung: Aufloesung im Step head (P1 R13) ==="
+
+# Die HEAD-Bindung akzeptiert auch die siebenstellige Kurzform, weil Codex die
+# Commit-Zelle der Summary so schreibt (llc-ops-backlog#1147: `2293878`). Sieben
+# Hex-Zeichen sind 28 Bit: ein PR-Autor kann einen neuen Commit mit demselben
+# Praefix wie ein bereits abgeschlossener Review-Commit erzeugen und dessen
+# Freigabe uebernehmen. Aufgeloest wird deshalb EINE EBENE HOEHER, im Step
+# `Resolve PR HEAD` — `eval_body()` wird offline geprueft und darf kein Netz
+# sehen. Hier wird der Block genauso aus der YAML gezogen und ausgefuehrt, nur
+# mit gestelltem `gh`.
+AUFL_RAW="$(awk '/^[[:space:]]*SHORT="\$SHA"[[:space:]]*$/{f=1} f{print} f && /short=\$SHORT/{exit}' "$WF")"
+if [ -z "$AUFL_RAW" ]; then
+  for p in kurz-sha-abruf-getrennt-geprueft kurz-sha-eindeutig-erlaubt-die-kurzform \
+           kurz-sha-fremde-aufloesung-faellt-auf-voll-zurueck \
+           kurz-sha-abruf-gescheitert-faellt-auf-voll-zurueck \
+           kurz-sha-vorgabe-ist-voll-nicht-leer kurz-sha-kommt-aus-dem-step-output; do
+    echo "  FAIL [$p] → Aufloesungs-Block fehlt ganz"; FAIL=$((FAIL+1))
+  done
+else
+PAD2="$(printf '%s\n' "$AUFL_RAW" | head -1 | sed 's/[^ ].*//')"
+AUFL="$(printf '%s\n' "$AUFL_RAW" | sed "s/^${PAD2}//")"
+
+# B1) Struktur: der Abruf steht in einer eigenen Zuweisung, deren Exitcode die
+#     `if`-Bedingung ist. Eine Pipe verschluckt den Abruffehler.
+if printf '%s' "$AUFL" | grep -qE '^[[:space:]]*if [A-Z][A-Z0-9_]*=\$\(gh api'; then
+  echo "  ok   [kurz-sha-abruf-getrennt-geprueft]"; PASS=$((PASS+1))
+else
+  echo "  FAIL [kurz-sha-abruf-getrennt-geprueft] → der Abruf haengt ungeprueft"; FAIL=$((FAIL+1))
+fi
+
+# Verhalten OHNE Netz: `gh` wird gestellt, der echte Block ausgefuehrt.
+gh() { if [ "${GH_RC:-0}" != 0 ]; then return "${GH_RC}"; fi; printf '%s\n' "${GH_OUT:-}"; }
+kurz_aufloesung() { # $1=rc des Abrufs  $2=Ausgabe des Abrufs → gesetzter short-Wert
+  local SHA GITHUB_REPOSITORY GITHUB_OUTPUT ergebnis
+  SHA="$HEAD_SHA"
+  GITHUB_REPOSITORY="Paul-Brandenburg-LLC/llc-workflow-templates"
+  GITHUB_OUTPUT="$(mktemp)"
+  # `mktemp` kann LEER scheitern — dann schriebe die Umleitung ins Nichts und
+  # die Probe waere blind.
+  [ -n "$GITHUB_OUTPUT" ] || { printf 'MKTEMP-LEER'; return 0; }
+  GH_RC="$1"; GH_OUT="$2"
+  eval "$AUFL"
+  ergebnis="$(sed -n 's/^short=//p' "$GITHUB_OUTPUT")"
+  rm -f "$GITHUB_OUTPUT"
+  printf '%s' "$ergebnis"
+}
+
+FREMD_VOLL="0123456789012345678901234567890123456789"
+
+# B2) Loest der Praefix eindeutig auf genau diesen HEAD auf, bleibt die
+#     Kurzform erlaubt. Faellt sie weg, ist das ein NEUER Deadlock: Codex
+#     schreibt die Commit-Zelle siebenstellig.
+V=$(kurz_aufloesung 0 "$HEAD_SHA")
+check "kurz-sha-eindeutig-erlaubt-die-kurzform" "${HEAD_SHA:0:7}" "$V"
+
+# B3) Loest er auf einen ANDEREN Commit auf (Praefix-Kollision), faellt die
+#     Bindung auf den vollen SHA zurueck — die Stale-Uebernahme ist damit zu.
+V=$(kurz_aufloesung 0 "$FREMD_VOLL")
+check "kurz-sha-fremde-aufloesung-faellt-auf-voll-zurueck" "$HEAD_SHA" "$V"
+
+# B4) Scheitert der Abruf (mehrdeutig, 422, kein Netz, fehlende Rechte), gilt
+#     der Kurz-Hash als NICHT verwendbar. Vorgabe bleibt der volle SHA.
+V=$(kurz_aufloesung 1 "")
+check "kurz-sha-abruf-gescheitert-faellt-auf-voll-zurueck" "$HEAD_SHA" "$V"
+
+# B5) Und die Vorgabe darf NIE leer sein: `grep -F -e ""` traefe jede Zeile und
+#     machte das Tor maximal gruen — die falsche Irrtumsrichtung. Gemessen an
+#     der Zuweisung im Block, nicht nur am Ergebnis.
+if printf '%s' "$AUFL" | grep -qE '^[[:space:]]*SHORT="\$SHA"[[:space:]]*$'; then
+  echo "  ok   [kurz-sha-vorgabe-ist-voll-nicht-leer]"; PASS=$((PASS+1))
+else
+  echo "  FAIL [kurz-sha-vorgabe-ist-voll-nicht-leer] → Vorgabe ist nicht der volle SHA"; FAIL=$((FAIL+1))
+fi
+
+# B6) Der Verbraucher muss den geprueften Wert auch NEHMEN. Rechnet der
+#     Urteils-Step die Kurzform wieder selbst aus (`${HEAD_SHA:0:7}`), laeuft
+#     die ganze Aufloesung ins Leere.
+B6_FEHLT=""
+grep -qF 'SHORT_SHA: ${{ steps.head.outputs.short }}' "$WF" || B6_FEHLT="$B6_FEHLT env-SHORT_SHA-aus-step-output"
+grep -qE '^[[:space:]]*SHORT_SHA="\$\{HEAD_SHA:0:7\}"' "$WF" && B6_FEHLT="$B6_FEHLT lokale-Neuberechnung-zurueck"
+if [ -z "$B6_FEHLT" ]; then
+  echo "  ok   [kurz-sha-kommt-aus-dem-step-output]"; PASS=$((PASS+1))
+else
+  echo "  FAIL [kurz-sha-kommt-aus-dem-step-output] → fehlt/falsch:$B6_FEHLT"; FAIL=$((FAIL+1))
+fi
 fi
 
 echo "=== $PASS passed, $FAIL failed ==="
