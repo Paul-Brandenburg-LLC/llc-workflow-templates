@@ -178,6 +178,52 @@ V=$(eval_body "$SUM_OK");    check "completed+arg-fehlt→pending" "" "$V"
 V=$(eval_body "$(summary '🔄 **Running**' "$SHORT_SHA")" 2)
 check "running+offene-befunde→failure" failure "$V"
 
+echo "=== Abruf-Fehler darf nicht als 'null Befunde' gelten ==="
+
+# A1) Die Demonstration der Falle (Vorpruefung P1, Runde 4): der jq-Filter
+#     ALLEIN kann "keine Befunde" nicht von "Abruf gescheitert" unterscheiden —
+#     auf leerer Eingabe liefert er 0 und endet mit Exitcode 0. Deshalb darf er
+#     nie direkt an `gh api` haengen.
+LEER_ERGEBNIS="$(printf '' | jq -s --arg head x '(add // []) | length' 2>/dev/null)"
+if [ "$LEER_ERGEBNIS" = "0" ]; then
+  echo "  ok   [leere-eingabe-liefert-0 (die Falle ist real)]"; PASS=$((PASS+1))
+else
+  echo "  FAIL [leere-eingabe-liefert-0] → got '$LEER_ERGEBNIS'"; FAIL=$((FAIL+1))
+fi
+
+# A2) Also MUSS der Workflow den Abruf getrennt pruefen: Ausgabe in eine
+#     Variable, Exitcode als Bedingung, erst dann jq.
+OFFEN_BLOCK="$(awk '/CODEX_OFFEN=/{f=1} f{print} f && /CODEX_OFFEN:-unbekannt/{exit}' "$WF")"
+# Fehlt der Block ganz (alter Stand), ist das ein Fehlschlag der Probe — kein
+# Abbruch: die Gegenprobe soll alle Befunde zeigen, nicht beim ersten aufhoeren.
+if [ -z "$OFFEN_BLOCK" ]; then
+  echo "  FAIL [abruf-exitcode-wird-geprueft] → CODEX_OFFEN-Block fehlt ganz"
+  echo "  FAIL [kein-direkter-pipe-gh-nach-jq] → CODEX_OFFEN-Block fehlt ganz"
+  echo "  FAIL [vorgabewert-ist-leer-nicht-null] → CODEX_OFFEN-Block fehlt ganz"
+  FAIL=$((FAIL+3))
+else
+
+if printf '%s' "$OFFEN_BLOCK" | grep -q 'if COMMENTS_RAW='; then
+  echo "  ok   [abruf-exitcode-wird-geprueft]"; PASS=$((PASS+1))
+else
+  echo "  FAIL [abruf-exitcode-wird-geprueft] → gh api haengt ungeprueft an jq"; FAIL=$((FAIL+1))
+fi
+
+# A3) Gegenprobe zu A2: `gh api` darf im Block NICHT direkt in `jq` laufen.
+if printf '%s' "$OFFEN_BLOCK" | grep -A1 'gh api --paginate' | grep -q '| jq'; then
+  echo "  FAIL [kein-direkter-pipe-gh-nach-jq] → der stille Fehlerfall ist zurueck"; FAIL=$((FAIL+1))
+else
+  echo "  ok   [kein-direkter-pipe-gh-nach-jq]"; PASS=$((PASS+1))
+fi
+
+# A4) Und der Vorgabewert vor dem Abruf muss LEER sein, nicht 0.
+if printf '%s' "$OFFEN_BLOCK" | grep -qE '^[[:space:]]*CODEX_OFFEN=""'; then
+  echo "  ok   [vorgabewert-ist-leer-nicht-null]"; PASS=$((PASS+1))
+else
+  echo "  FAIL [vorgabewert-ist-leer-nicht-null] → unbekannt wuerde als 0 gelesen"; FAIL=$((FAIL+1))
+fi
+fi
+
 echo "=== scope-Riegel: Ereignis-Unabhaengigkeit ==="
 
 # S1) Der `if` des Steps `scope` darf NICHT am Ereignistyp haengen. Doc-only ist

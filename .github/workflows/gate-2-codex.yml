@@ -409,9 +409,20 @@ jobs:
           # Review-Kommentaren wandert beim Push auf den neuen HEAD mit.
           #
           # `--paginate` + `jq -s` mit `(add // [])` sind Pflicht (siehe oben, v1.6.2).
-          # Scheitert der Abruf, bleibt der Wert LEER = "unbekannt" und das Gate
-          # bleibt `pending`. Leer darf NIE als "null Befunde" gelesen werden.
-          CODEX_OFFEN=$(gh api --paginate "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" 2>/dev/null \
+          #
+          # ⛔ ABRUF UND AUSWERTUNG MUESSEN GETRENNT SEIN (Vorpruefung P1, Runde 4).
+          # Als eine Pipe geschrieben — `gh api … | jq …` — ist der Fehlerfall
+          # STILL: scheitert `gh api`, bekommt `jq` leere Eingabe, `(add // [])`
+          # macht daraus `[]` und `length` liefert `0`. `jq` endet mit 0, ein
+          # nachgestelltes `|| echo ""` feuert also NIE — und "0 offene Befunde"
+          # ist genau die Aussage, die ein abgeschlossenes Summary auf `success`
+          # setzt. Eine leere Antwort ist kein Beleg fuer Abwesenheit.
+          # Deshalb: erst abrufen und den Exitcode pruefen, dann auswerten.
+          # Scheitert eines von beidem, bleibt der Wert LEER = "unbekannt" und das
+          # Gate bleibt `pending`. Leer darf NIE als "null Befunde" gelesen werden.
+          CODEX_OFFEN=""
+          if COMMENTS_RAW=$(gh api --paginate "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" 2>"$RUNNER_TEMP/codex-comments.err"); then
+            CODEX_OFFEN=$(printf '%s' "$COMMENTS_RAW" \
             | jq -s --arg head "$HEAD_SHA" '
                 (add // []) as $all
                 | ($all | map(select(.in_reply_to_id != null) | .in_reply_to_id) | unique) as $beantwortet
@@ -421,7 +432,11 @@ jobs:
                     | select(.in_reply_to_id == null)
                     | select([.id] | inside($beantwortet) | not) ]
                 | length' 2>/dev/null || echo "")
+          else
+            echo "::warning::Codex-Zeilenbefunde nicht abrufbar — Gate bleibt pending. $(head -c 200 "$RUNNER_TEMP/codex-comments.err" 2>/dev/null)"
+          fi
           case "$CODEX_OFFEN" in ''|*[!0-9]*) CODEX_OFFEN="" ;; esac
+          [ -n "$CODEX_OFFEN" ] || echo "::warning::Codex-Zeilenbefunde unbekannt (Abruf oder Auswertung gescheitert) — Gate bleibt pending"
           echo "Offene Codex-Zeilenbefunde am HEAD: ${CODEX_OFFEN:-unbekannt}"
 
           STATE=pending
