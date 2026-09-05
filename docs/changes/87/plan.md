@@ -124,3 +124,24 @@ Der Standard beschreibt das Soll-Verhalten der Bruecke bereits
 … Fehlt der passende HEAD-SHA, setzt der Bridge Status `pending`"). Der Fix
 **stellt dieses Verhalten her**, er aendert es nicht — damit greift die
 Spec-first-Pflicht fuer Gate-/Workflow-**Aenderungen** nicht.
+
+## Offen
+
+- **Verhaltenstest der Verdict-KETTE** (Vorpruefung P1 Runde 6, Befund 1). Der
+  `eval_body()`-Test misst die Funktion isoliert; die Kette darum herum
+  (Review-Zweig → Kommentar-Fallback) ist bisher nur durch den Code-Kommentar
+  belegt. Bauplan: den Block von `STATE=pending` bis vor die Zeile, die `state=`
+  in `GITHUB_OUTPUT` schreibt, genauso aus der Workflow-Datei ziehen wie
+  `eval_body()`, mit gesetzten `REVIEW_SHA` / `REVIEW_STATE` / `REVIEW_BODY` /
+  `COMMENT_BODY` / `CODEX_OFFEN` ausfuehren und den erreichten Status pruefen.
+  Faelle:
+  - `COMMENTED` ohne Body + Summary `Completed` + 0 offene → `success`
+    (**der Befund**; vorher `pending`)
+  - `APPROVED` → `success`
+  - `CHANGES_REQUESTED` → `failure`
+  - `COMMENTED` mit Findings-Body → `failure`
+  - kein Review + Summary `Completed` → `success`
+  - `COMMENTED` ohne Body + 2 offene Threads → `failure`
+  - Summary `Running` → `pending`
+  - Review an fremdem SHA + Summary am HEAD → `success`
+  - offene Befunde unbekannt (leer) → `pending`
