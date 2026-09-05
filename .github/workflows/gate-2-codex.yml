@@ -49,10 +49,37 @@ concurrency:
 
 jobs:
   bridge:
+    # --- Jeder Statuswechsel braucht ein Ereignis (v1.9.0, llc-ops-backlog#87) --
+    # Vorpruefung P1, Runde 9: Das Tor zaehlt offene Codex-Befund-Threads und
+    # steht bei Befunden auf `failure`. Das AUFLOESEN eines Threads loest aber
+    # KEINEN Lauf aus — GitHub Actions kennt `pull_request_review_thread` nicht
+    # (nachgeschlagen 2026-09-05 an der Ereignis-Liste; es gibt den Trigger nur
+    # als Webhook). Ein Befund an unveraenderten Zeilen liesse das Tor deshalb
+    # nach dem Aufloesen dauerhaft rot stehen: der Deadlock von der anderen
+    # Seite, gegen den dieser ganze Fix da ist.
+    #
+    # Der Ausweg ist NICHT, die Zaehlung fallen zu lassen und auf die native
+    # Conversation-Protection zu setzen: die ist am 05.09.2026 in nur 3 von 32
+    # Consumer-Repos aktiv (`required_conversation_resolution`), das Tor traege
+    # die Last also faktisch allein.
+    #
+    # Deshalb der zweite Weg: ein ausdruecklicher Recheck-Eingang. Die Bruecke
+    # ist ein reiner NEUBERECHNER — sie liest den Zustand und schreibt einen
+    # Status. Wer den Lauf ausloest, aendert am Ergebnis nichts, also gibt es
+    # keinen Grund, den Ausloeser auf den Codex-Bot zu verengen; die Verengung
+    # war eine Sparmassnahme und hat die Neuberechnung nach dem Aufloesen
+    # verhindert. Jetzt genuegt EIN KOMMENTAR am PR (oder ein Review, oder ein
+    # Push) — alles Ereignisse, die die verteilten Caller ohnehin abonnieren
+    # (`pull_request`, `pull_request_review`, `issue_comment`). Der
+    # Failure-Status nennt diesen Weg im Text.
+    # Der PR-Waechter (`issue.pull_request != null`) bleibt: auf reinen Issues
+    # hat die Bruecke nichts zu suchen. `state == 'open'` haelt Kommentare an
+    # geschlossenen PRs draussen — dort ist nichts mehr zu entscheiden.
+    # Beweis: scripts/gate-2-verdict-selftest.sh (Faelle S3-S5).
     if: >-
       (github.event_name == 'pull_request') ||
-      (github.event_name == 'pull_request_review' && github.event.review.user.login == 'chatgpt-codex-connector[bot]') ||
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && github.event.comment.user.login == 'chatgpt-codex-connector[bot]')
+      (github.event_name == 'pull_request_review') ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && github.event.issue.state == 'open')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -429,8 +456,12 @@ jobs:
           # Ein Befund an Code, den der naechste Push aendert, wird `isOutdated`
           # und zaehlt nicht mehr — und dieser Push feuert `synchronize`. Ein
           # Befund an unveraendertem Code blockiert weiter, zu Recht.
-          # Das Aufloesen selbst bleibt Sache der Branch-Protection
-          # ("All comments must be resolved"); das Tor bildet es nicht nach.
+          # Das Aufloesen selbst kann kein Ereignis erzeugen (Actions kennt
+          # `pull_request_review_thread` nicht). Damit ein aufgeloester Befund
+          # das Tor trotzdem wieder freigibt, genuegt seit v1.9.0 ein beliebiger
+          # PR-Kommentar als Recheck — siehe Job-`if` oben (P1 Runde 9). Ohne
+          # diesen Eingang stuende das Tor bei einem Befund an unveraenderten
+          # Zeilen nach dem Aufloesen dauerhaft rot.
           #
           # Gemessen wird auf `!= true`, nicht auf `== false`: faellt ein Feld
           # einmal weg, ist der Zustand UNBEKANNT — und unbekannt muss hier als
@@ -555,8 +586,10 @@ jobs:
             [ "$V" = success ] && { STATE=success; DESC="Codex comment (HEAD): no findings"; }
             # Offene Zeilenbefunde sind hier der haeufigste Grund fuer failure —
             # sie im Text benennen, sonst sucht man sie im Kommentar-Body.
+            # Der Text ist der einzige Ort, an dem der Weg heraus steht: das
+            # Aufloesen allein loest keinen Lauf aus (P1 Runde 9, s. Job-`if`).
             if [ "$V" = failure ] && [ -n "$CODEX_OFFEN" ] && [ "$CODEX_OFFEN" -gt 0 ]; then
-              DESC="Codex findings (HEAD): $CODEX_OFFEN offene Zeilenkommentare"
+              DESC="$CODEX_OFFEN offene Codex-Befunde — aufloesen, dann PR-Kommentar (rechnet neu)"
             fi
           fi
           # Andernfalls bleibt STATE=pending → Codex re-reviewt den neuen HEAD via Integration;
