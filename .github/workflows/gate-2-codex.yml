@@ -248,7 +248,23 @@ jobs:
 
       - name: Scope Skip — Doc-only / Pin-Bump (PB LLC §3.4 v5.8 M2 + v7.0.5)
         id: scope
-        if: github.event_name == 'pull_request' && steps.head.outputs.bot_exempt != 'true'
+        # --- Ereignis-UNABHAENGIG (v1.9.0, llc-ops-backlog#87) --------------------
+        # Frueher stand hier zusaetzlich `github.event_name == 'pull_request'`. Das
+        # machte JEDEN Doc-only-PR der Org dauerhaft unmergebar: Codex schreibt
+        # kurz nach dem Oeffnen seinen Zusammenfassungs-Kommentar, die Bruecke
+        # laeuft darauf als `issue_comment` erneut — und dieser Step lief dann
+        # nicht. `outputs.skip` blieb LEER; leer ist nicht `'true'`, also
+        # passierten die beiden folgenden Steps ihren Waechter (`skip != 'true'`),
+        # die Bruecke fiel in den Codex-Urteilszweig und ueberschrieb ihr eigenes,
+        # korrektes `success` mit `pending`. Gruen wurde es nie wieder: der Code
+        # rechnet mit einem folgenden `pull_request_review`-Event, aber ein Review
+        # OHNE Befund gibt es bei Codex nicht (nur eine 👍-Reaktion). Deadlock.
+        # Doc-only ist eine Eigenschaft des DIFFS, nicht des Ausloesers — dieselbe
+        # Begruendung, aus der der Step "Resolve PR HEAD" oben schon
+        # ereignis-unabhaengig laeuft. Der Job-`if` deckt die Ereignisauswahl
+        # bereits ab (issue_comment nur an PRs und nur vom Codex-Bot).
+        # Beweis: scripts/gate-2-verdict-selftest.sh (Faelle S1/S2).
+        if: steps.head.outputs.bot_exempt != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
@@ -381,9 +397,15 @@ jobs:
           STATE=pending
           DESC="Awaiting Codex review for current HEAD"
 
+          # --- Banner-Erkennung: JEDE Rautentiefe (v1.9.0, llc-ops-backlog#87) ------
+          # Verlangt waren genau drei Rauten (`^### Codex Review`). Codex schreibt
+          # real `## Codex Review Summary` — zwei Rauten plus `Summary`. Kein
+          # Treffer, `STATE` blieb auf `pending`. `^#+` deckt jede Tiefe ab; die
+          # Anker `^` bleiben Pflicht, sonst faelscht ein Zitat ein Approval.
+          # Beweis: scripts/gate-2-verdict-selftest.sh (Faelle V1-V7).
           eval_body() {  # $1=body → echoes success|failure|"" (kein erkennbares Verdict)
             if echo "$1" | grep -qE '### Integrations-Befunde|### Findings|🚨|\*\*P[01]\*\*'; then echo failure
-            elif echo "$1" | grep -qE '^### 💡 Codex Review|^### Codex Review|^Codex Review: '; then echo success
+            elif echo "$1" | grep -qE '^#+[[:space:]]*(💡[[:space:]]*)?Codex Review|^Codex Review: '; then echo success
             else echo ""; fi
           }
 
