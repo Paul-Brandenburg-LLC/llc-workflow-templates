@@ -5,8 +5,10 @@
 `gate-2-codex` macht **jeden Doc-only-PR der Org strukturell unmergebar**. Der
 Defekt steckt in **jeder** gepinnten Fassung (`v1` beweglich, `v1.1.2`, `v1.6.1`,
 `v1.6.2`, `v1.7.1`, `v1.8.0`, `v1.8.1`, `main`); `v1.8.0` und `v1.8.1` sind fuer
-diese Datei zeichengleich, ein hoeherer Pin hilft also nicht. **35 Repos**
-betroffen. Das Issue steht seit dem 29.04.2026 offen.
+diese Datei zeichengleich, ein hoeherer Pin hilft also nicht. **32 Repos**
+betroffen (am 05.09.2026 ausgezaehlt: 37 aktive Repos, davon 4 ohne die Datei
+und `llc-workflow-templates` selbst beweglich auf `@v1`; die urspruenglich
+gemeldete "35" war eine Schaetzung). Das Issue steht seit dem 29.04.2026 offen.
 
 ### Die Kette
 
@@ -83,7 +85,7 @@ getauscht.
   Datei zurueckdreht.
 - **Gegen den alten Stand rot belegt: 18/29.**
   `git show <sha>:.github/workflows/gate-2-codex.yml > /tmp/alt.yml && GATE2_WORKFLOW=/tmp/alt.yml bash scripts/gate-2-verdict-selftest.sh`
-- `scripts/gate-2-threads-selftest.sh` — **NEU**, 15 Faelle, alle gruen. Zieht
+- `scripts/gate-2-threads-selftest.sh` — **NEU**, 20 Faelle, alle gruen. Zieht
   den Zaehl-Ausdruck ebenfalls **im Ganzen** aus der Workflow-Datei. Enthaelt
   die Verhaltensprobe des Runde-5-Befunds: derselbe widersprochene, offene
   Befund zaehlt unter der alten Fassung **0**, unter der neuen **1**. Gegen den
@@ -93,7 +95,21 @@ getauscht.
   (Teil B2, `--paginate` + `$endCursor` + `pageInfo` + `jq -s`). Gegenproben
   gefahren und im Test verankert: die beiden verbotenen Pipe-Schreibweisen und
   drei bewusst falsche GraphQL-Fassungen schlagen weiter an.
-- Alle **elf** `scripts/*-selftest.sh` liefern `rc=0`.
+- `scripts/gate-2-chain-selftest.sh` — **NEU**, 13 Proben (die neun Faelle der
+  Kette plus zwei Struktur- und zwei Gegenproben), alle gruen. Zieht den
+  KETTENBLOCK im Ganzen aus der Workflow-Datei (von `STATE=pending` bis vor die
+  Zeile, die `state=` nach `GITHUB_OUTPUT` schreibt) und misst den erreichten
+  `STATE`. Noetig, weil der Runde-6-Befund nicht in `eval_body()` lag, sondern in
+  der Verzweigung darum herum — eine isolierte Funktionsprobe kann ihn
+  strukturell nicht sehen.
+  **Gegen den alten Stand rot belegt:** gegen `2ddd736` (vor dem elif-Fix)
+  2 Fehlschlaege (K1, K6), gegen `origin/main` 4 (K1, K5, K6, K8).
+  Die alte Kettenform steht als Literal im Test und belegt, dass die Fixture von
+  K1 den fehlerhaften Pfad wirklich erreicht (`pending`) — mit Gegenprobe, dass
+  sie nicht generell kaputt ist (`APPROVED` ergibt auch dort `success`).
+- Alle **zwoelf** `scripts/*-selftest.sh` liefern `rc=0`. `ci.yml` zaehlt das
+  Verzeichnis aus (`for t in scripts/*-selftest.sh`) — der neue Test haengt ohne
+  Nachtrag in der Pflicht-CI.
 
 ## Reihenfolge beim Ausrollen — der Teil, den man nur einmal falsch macht
 
@@ -104,7 +120,7 @@ getauscht.
 ermittelt den Tag mit `git tag -l 'v*' | sort -V | tail -1`. Fehlt `v1.9.0` in
 dem Moment, verteilt sie **`v1.8.1`** — also den kaputten Stand. Und die
 Zweignamen tragen den Tag (`chore/pin-bump-gate-2-codex-<TAG>`): eine zweite
-Welle ersetzt die falschen PRs nicht, sondern legt **35 weitere** daneben.
+Welle ersetzt die falschen PRs nicht, sondern legt **32 weitere** daneben.
 
 Ablauf: Tore gruen abwarten → Tag `v1.9.0` auf den PR-Kopf setzen → mergen →
 Welle nachhalten. Notfalls nachfassen per `workflow_dispatch` (Eingaben `tag`,
@@ -125,23 +141,21 @@ Der Standard beschreibt das Soll-Verhalten der Bruecke bereits
 **stellt dieses Verhalten her**, er aendert es nicht — damit greift die
 Spec-first-Pflicht fuer Gate-/Workflow-**Aenderungen** nicht.
 
-## Offen
+## Erledigt (war offen: Verhaltenstest der Verdict-KETTE)
 
-- **Verhaltenstest der Verdict-KETTE** (Vorpruefung P1 Runde 6, Befund 1). Der
-  `eval_body()`-Test misst die Funktion isoliert; die Kette darum herum
-  (Review-Zweig → Kommentar-Fallback) ist bisher nur durch den Code-Kommentar
-  belegt. Bauplan: den Block von `STATE=pending` bis vor die Zeile, die `state=`
-  in `GITHUB_OUTPUT` schreibt, genauso aus der Workflow-Datei ziehen wie
-  `eval_body()`, mit gesetzten `REVIEW_SHA` / `REVIEW_STATE` / `REVIEW_BODY` /
-  `COMMENT_BODY` / `CODEX_OFFEN` ausfuehren und den erreichten Status pruefen.
-  Faelle:
-  - `COMMENTED` ohne Body + Summary `Completed` + 0 offene → `success`
-    (**der Befund**; vorher `pending`)
-  - `APPROVED` → `success`
-  - `CHANGES_REQUESTED` → `failure`
-  - `COMMENTED` mit Findings-Body → `failure`
-  - kein Review + Summary `Completed` → `success`
-  - `COMMENTED` ohne Body + 2 offene Threads → `failure`
-  - Summary `Running` → `pending`
-  - Review an fremdem SHA + Summary am HEAD → `success`
-  - offene Befunde unbekannt (leer) → `pending`
+Gebaut als `scripts/gate-2-chain-selftest.sh`, 05.09.2026. Alle neun geplanten
+Faelle sind drin und gruen:
+
+| Fall | Eingang | erwartet |
+|---|---|---|
+| K1 | `COMMENTED` ohne Body + Summary `Completed` + 0 offene | `success` (**der Befund**; vorher `pending`) |
+| K2 | `APPROVED` | `success` |
+| K3 | `CHANGES_REQUESTED` | `failure` |
+| K4 | `COMMENTED` mit Findings-Body | `failure` |
+| K5 | kein Review + Summary `Completed` | `success` |
+| K6 | `COMMENTED` ohne Body + 2 offene Threads | `failure` |
+| K7 | Summary `Running` | `pending` |
+| K8 | Review an fremdem SHA + Summary am HEAD | `success` |
+| K9 | offene Befunde unbekannt (leer) | `pending` |
+
+Damit ist die Nacharbeit aus Runde 6 abgeschlossen; es steht nichts mehr offen.
