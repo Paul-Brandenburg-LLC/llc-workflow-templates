@@ -95,8 +95,12 @@ seite() {
     '{data:{repository:{pullRequest:{reviewThreads:{pageInfo:{hasNextPage:false,endCursor:null},nodes:$n}}}}}'
 }
 
-# Ein Thread. $1 = isResolved, $2 = Login des ERSTEN Kommentars.
-thread() { jq -nc --argjson r "$1" --arg l "$2" '{isResolved:$r,comments:{nodes:[{author:{login:$l}}]}}'; }
+# Ein Thread. $1 = isResolved, $2 = Login des ERSTEN Kommentars,
+# $3 = isOutdated (Vorgabe false).
+thread() {
+  jq -nc --argjson r "$1" --arg l "$2" --argjson o "${3:-false}" \
+    '{isResolved:$r,isOutdated:$o,comments:{nodes:[{author:{login:$l}}]}}'
+}
 
 BOT="chatgpt-codex-connector"
 BOT_REST="chatgpt-codex-connector[bot]"
@@ -127,8 +131,31 @@ probe "zwei Seiten mit je einem offenen Thread" "$ZWEI_SEITEN" 2
 # nicht abstuerzen lassen — ein Absturz waere ein LEERES Ergebnis, und leer
 # bedeutet im Workflow "unbekannt" (Gate bleibt pending). Das ist zwar die
 # sichere Richtung, aber es waere ein Dauerblocker.
-probe "Thread ohne Kommentare"    "$(seite '[{"isResolved":false,"comments":{"nodes":[]}}]')"          0
-probe "Thread mit geloeschtem Autor" "$(seite '[{"isResolved":false,"comments":{"nodes":[{"author":null}]}}]')" 0
+probe "Thread ohne Kommentare"    "$(seite '[{"isResolved":false,"isOutdated":false,"comments":{"nodes":[]}}]')"          0
+probe "Thread mit geloeschtem Autor" "$(seite '[{"isResolved":false,"isOutdated":false,"comments":{"nodes":[{"author":null}]}}]')" 0
+
+# --- O) Veraltete Threads zaehlen nicht (P1 Runde 6) ------------------------
+# Das Aufloesen eines Threads loest KEINEN Workflow aus — GitHub Actions kennt
+# `pull_request_review_thread` nicht, und die Caller abonnieren nur
+# `pull_request`, `pull_request_review` und `issue_comment`. Wuerde die blosse
+# Auflosung den Status drehen, gaebe es dafuer nie einen Lauf und das Tor bliebe
+# rot stehen. Deshalb ist der Status eine Funktion des HEAD: ein Befund an Code,
+# den der naechste Push aendert, wird `isOutdated` — und dieser Push feuert
+# `synchronize`.
+echo
+echo "O) Veraltete Befunde blockieren nicht mehr — der Uebergang haengt am Push"
+
+probe "offener, aber VERALTETER Codex-Thread"   "$(seite "[$(thread false "$BOT" true)]")"  0
+probe "offener, AKTUELLER Codex-Thread"         "$(seite "[$(thread false "$BOT" false)]")" 1
+probe "veraltet UND aufgeloest"                 "$(seite "[$(thread true  "$BOT" true)]")"  0
+
+# Unbekannt ist nicht erledigt: faellt ein Feld weg, muss der Thread als OFFEN
+# gelten. Mit `== false` statt `!= true` waere ein fehlendes Feld ein
+# stillschweigendes "erledigt" — und damit ein gruenes Tor.
+OHNE_OUTDATED='[{"isResolved":false,"comments":{"nodes":[{"author":{"login":"chatgpt-codex-connector"}}]}}]'
+OHNE_RESOLVED='[{"isOutdated":false,"comments":{"nodes":[{"author":{"login":"chatgpt-codex-connector"}}]}}]'
+probe "isOutdated fehlt ganz → gilt als aktuell" "$(seite "$OHNE_OUTDATED")" 1
+probe "isResolved fehlt ganz → gilt als offen"   "$(seite "$OHNE_RESOLVED")" 1
 
 # ---------------------------------------------------------------------------
 # V) Verhaltensprobe: warum "beantwortet" nicht "erledigt" heisst

@@ -413,11 +413,29 @@ jobs:
           # ist derselbe Zustand, den die Branch-Protection mit
           # "All comments must be resolved" verlangt.
           #
-          # Damit entfaellt auch der HEAD-Filter: ein offener Thread blockiert,
-          # gleich an welchem Commit er haengt. Das ist Absicht — die `commit_id`
-          # von Review-Kommentaren wandert beim Push ohnehin auf den neuen HEAD mit,
-          # und die Irrtumsrichtung soll auf "zu vorsichtig" zeigen, nie auf
-          # "zu gruen".
+          # ⛔ Gezaehlt werden nur AKTUELLE Threads (`isOutdated == false`)
+          # — Vorpruefung P1, Runde 6. Der Grund ist kein inhaltlicher, sondern
+          # ein Ereignis-Grund: Das Aufloesen eines Threads loest KEINEN
+          # Workflow aus. GitHub Actions kennt `pull_request_review_thread`
+          # nicht (nachgeschlagen 2026-09-05: unterstuetzt sind `pull_request`,
+          # `pull_request_review`, `pull_request_review_comment` und
+          # `pull_request_target`), und die verteilten Caller abonnieren nur
+          # `pull_request`, `pull_request_review` und `issue_comment`.
+          # Wuerde die blosse Auflosung den Status drehen, gaebe es dafuer nie
+          # einen Lauf: das Tor bliebe rot stehen — der Deadlock von der anderen
+          # Seite.
+          # Deshalb ist der Status eine Funktion des HEAD-Zustands, und jeder
+          # Uebergang haengt an einem Ereignis, das die Caller wirklich sehen:
+          # Ein Befund an Code, den der naechste Push aendert, wird `isOutdated`
+          # und zaehlt nicht mehr — und dieser Push feuert `synchronize`. Ein
+          # Befund an unveraendertem Code blockiert weiter, zu Recht.
+          # Das Aufloesen selbst bleibt Sache der Branch-Protection
+          # ("All comments must be resolved"); das Tor bildet es nicht nach.
+          #
+          # Gemessen wird auf `!= true`, nicht auf `== false`: faellt ein Feld
+          # einmal weg, ist der Zustand UNBEKANNT — und unbekannt muss hier als
+          # "offen" gelten. Mit `== false` waere ein fehlendes Feld ein
+          # stillschweigendes "erledigt" und damit ein gruenes Tor.
           #
           # `--paginate` ist auch bei GraphQL Pflicht: die Verbindung liefert nur
           # `first: 100` je Seite. Dafuer MUSS die Variable `$endCursor` heissen und
@@ -445,6 +463,7 @@ jobs:
                         pageInfo { hasNextPage endCursor }
                         nodes {
                           isResolved
+                          isOutdated
                           comments(first: 1) { nodes { author { login } } }
                         }
                       }
@@ -454,7 +473,8 @@ jobs:
             CODEX_OFFEN=$(printf '%s' "$THREADS_RAW" | jq -s '
                 [ .[] | .data.repository.pullRequest.reviewThreads.nodes[]? ]
                 | [ .[]
-                    | select(.isResolved == false)
+                    | select(.isResolved != true)
+                    | select(.isOutdated != true)
                     | select(((((.comments.nodes[0] // {}).author // {}).login // "")
                               | sub("\\[bot\\]$"; "")) == "chatgpt-codex-connector") ]
                 | length' 2>/dev/null || echo "")
@@ -514,8 +534,22 @@ jobs:
               [ "$V" = failure ] && { STATE=failure; DESC="Codex findings (HEAD)"; }
               [ "$V" = success ] && { STATE=success; DESC="Codex review (HEAD): no findings"; }
             fi
-          elif [ -n "$COMMENT_BODY" ] && echo "$COMMENT_BODY" | grep -qF -e "$HEAD_SHA" -e "$SHORT_SHA"; then
-            # (2) Kommentar-Fallback — nur wenn er den aktuellen HEAD-SHA explizit nennt.
+          fi
+
+          # (2) Kommentar-Fallback — nur wenn er den aktuellen HEAD-SHA explizit nennt.
+          #
+          # ⛔ Das haengt bewusst NICHT als `elif` am Review-Zweig (Vorpruefung P1,
+          # Runde 6). Codex hinterlaesst zu einem Review regelmaessig ein formales
+          # `COMMENTED` OHNE Body — die Befunde stehen in den Zeilen-Threads, das
+          # Urteil im Summary-Kommentar. Als `elif` war die Kette damit
+          # verschluckt: der Review-Zweig traf zu, `eval_body("")` lieferte kein
+          # Verdict, `STATE` blieb `pending`, und der Summary wurde nie gelesen.
+          # Das Tor haette nach dem Aufloesen der Befunde dauerhaft auf `pending`
+          # gestanden. Ein formales Review mit klarem Urteil (APPROVED /
+          # CHANGES_REQUESTED / Body mit Verdict) bleibt dagegen verbindlich —
+          # dann steht `STATE` nicht mehr auf `pending` und dieser Zweig laeuft
+          # gar nicht erst.
+          if [ "$STATE" = pending ] && [ -n "$COMMENT_BODY" ] && echo "$COMMENT_BODY" | grep -qF -e "$HEAD_SHA" -e "$SHORT_SHA"; then
             V=$(eval_body "$COMMENT_BODY" "$CODEX_OFFEN")
             [ "$V" = failure ] && { STATE=failure; DESC="Codex findings (comment@HEAD)"; }
             [ "$V" = success ] && { STATE=success; DESC="Codex comment (HEAD): no findings"; }
