@@ -5,10 +5,17 @@
 `gate-2-codex` macht **jeden Doc-only-PR der Org strukturell unmergebar**. Der
 Defekt steckt in **jeder** gepinnten Fassung (`v1` beweglich, `v1.1.2`, `v1.6.1`,
 `v1.6.2`, `v1.7.1`, `v1.8.0`, `v1.8.1`, `main`); `v1.8.0` und `v1.8.1` sind fuer
-diese Datei zeichengleich, ein hoeherer Pin hilft also nicht. **32 Repos**
-betroffen (am 05.09.2026 ausgezaehlt: 37 aktive Repos, davon 4 ohne die Datei
-und `llc-workflow-templates` selbst beweglich auf `@v1`; die urspruenglich
-gemeldete "35" war eine Schaetzung). Das Issue steht seit dem 29.04.2026 offen.
+diese Datei zeichengleich, ein hoeherer Pin hilft also nicht. **33 Repos**
+betroffen. Am 05.09.2026 ausgezaehlt (Abruf und Auswertung getrennt, sonst
+verschluckt die Pipe den Abruffehler): **37 aktive Repos** = 32 mit exaktem Pin
+(v1.6.1 … v1.8.1) + **1 mit einer eigenen alten Kopie** des kaputten Tors
+(`stattzeitung-net-site`, keine Pin-Zeile) + 3 ganz ohne die Datei
+(`claude-in-tmux-app`, `codex-in-tmux-app`, `grokbuild-app`; je 404 nachgeprueft)
++ `llc-workflow-templates` selbst, wo die Datei die Reusable IST und kein Caller.
+Die Welle trifft damit **33**, nicht 32 — die eigene Kopie wird als Modus
+`migrate` durch einen Thin-Caller ersetzt und ist ebenso betroffen. Die
+urspruenglich gemeldete "35" war eine Schaetzung. Das Issue steht seit dem
+29.04.2026 offen.
 
 ### Die Kette
 
@@ -25,9 +32,10 @@ gemeldete "35" war eine Schaetzung). Das Issue steht seit dem 29.04.2026 offen.
 
 ## Was der Fix tut
 
-1. **`scope` laeuft ereignis-unabhaengig.** Die Ereignisauswahl deckt der
-   Job-`if` bereits ab (issue_comment nur an PRs, nur vom Codex-Bot); der Step
-   „Resolve PR HEAD" laeuft aus demselben Grund schon ereignis-unabhaengig.
+1. **`scope` laeuft ereignis-unabhaengig.** Doc-only ist eine Eigenschaft des
+   DIFFS, nicht des Ausloesers. Die Ereignisauswahl deckt der Job-`if` ab
+   (issue_comment nur an offenen PRs); der Step „Resolve PR HEAD" laeuft aus
+   demselben Grund schon ereignis-unabhaengig.
 2. **`eval_body()` liest die Status-Spalte der Summary-Tabelle**, nicht die
    Ueberschrift.
 3. **Der Step zaehlt die OFFENEN Codex-Befund-Threads** und reicht sie als
@@ -38,6 +46,9 @@ gemeldete "35" war eine Schaetzung). Das Issue steht seit dem 29.04.2026 offen.
    Antwort (siehe „Die dritte falsche Reparatur" unten).
 4. **Abruf und Auswertung sind getrennt**, mit Exitcode-Pruefung und zwei
    `::warning::`-Ausgaengen.
+5. **Der Kommentar-Zweig haengt nicht mehr als `elif` am Review-Zweig.**
+6. **Der Job-`if` traegt einen Recheck-Eingang** (siehe „Die fuenfte falsche
+   Reparatur").
 
 ## Zwei naheliegende Reparaturen, die falsch sind
 
@@ -76,6 +87,38 @@ echte „ohne Befund"-Signal (gemessen: `nachrichtenmaschine-app#356` hat es,
 `llc-ops-backlog#1147` nicht), aber auf Reaktionen feuert kein Ereignis — die
 Bruecke liefe danach nicht erneut. Das haette den Deadlock nur gegen einen neuen
 getauscht.
+
+## Die fuenfte falsche Reparatur (Vorpruefung P1, Runde 9)
+
+**Ein Statuszustand, aus dem kein Ereignis mehr herausfuehrt.** Das Tor zaehlt
+offene Codex-Befund-Threads und steht bei Befunden auf `failure`. Das
+**Aufloesen** eines Threads loest aber KEINEN Actions-Lauf aus: an der
+Ereignis-Liste nachgeschlagen (05.09.2026) kennt Actions `pull_request`,
+`pull_request_review`, `pull_request_review_comment` und
+`pull_request_target` — `pull_request_review_thread` gibt es nur als **Webhook**.
+Ein Befund an **unveraenderten** Zeilen (also nicht `isOutdated`) liesse das Tor
+nach dem Aufloesen dauerhaft rot stehen: derselbe Deadlock von der anderen
+Seite.
+
+Der Ausweg ist **nicht**, die Zaehlung fallen zu lassen und auf die native
+Conversation-Protection zu setzen. Nachgemessen ueber alle 32 Consumer-Repos:
+`required_conversation_resolution` ist **3× `true`**, 22× nicht gesetzt, 7× keine
+Branch-Protection lesbar. In 29 von 32 Repos waere das ein echtes Loch — und §4
+verbietet, die Branch-Protection zu setzen.
+
+Deshalb der ausdrueckliche Recheck-Eingang im Job-`if`: die Bruecke ist ein
+reiner **Neuberechner**, sie liest den Zustand und schreibt einen Status. Wer
+den Lauf ausloest, aendert am Ergebnis nichts; die Verengung auf den Codex-Bot
+war eine Sparmassnahme und hat die Neuberechnung nach dem Aufloesen verhindert.
+Jetzt genuegt **ein beliebiger PR-Kommentar** (oder ein Review, oder ein Push) —
+alles Ereignisse, die die verteilten Caller ohnehin abonnieren. Der Failure-Text
+nennt den Weg heraus. Der PR-Waechter (`issue.pull_request != null`,
+`issue.state == 'open'`) bleibt: auf reinen Issues und an geschlossenen PRs hat
+die Bruecke nichts zu suchen.
+
+**Die Regel dahinter:** Wer einen Statuszustand entwirft, muss fuer JEDEN
+Uebergang ein Ereignis benennen koennen, das die Konsumenten wirklich
+abonnieren.
 
 ## Nachweis (§7)
 
@@ -129,7 +172,12 @@ getauscht.
 ermittelt den Tag mit `git tag -l 'v*' | sort -V | tail -1`. Fehlt `v1.9.0` in
 dem Moment, verteilt sie **`v1.8.1`** — also den kaputten Stand. Und die
 Zweignamen tragen den Tag (`chore/pin-bump-gate-2-codex-<TAG>`): eine zweite
-Welle ersetzt die falschen PRs nicht, sondern legt **32 weitere** daneben.
+Welle ersetzt die falschen PRs nicht, sondern legt **33 weitere** daneben.
+
+⚠ `stattzeitung-net-site` laeuft im Modus `migrate`, sein Zweig heisst deshalb
+`chore/auto-sync-gate-2-codex-v1.9.0` und faellt NICHT unter die Bot-Ausnahme
+(die verlangt woertlich `^chore/pin-bump-…-vX.Y.Z$`). Er braucht einen echten
+Codex-Durchlauf und ist der wahrscheinlichste Straggler.
 
 Ablauf: Tore gruen abwarten → Tag `v1.9.0` auf den PR-Kopf setzen → mergen →
 Welle nachhalten. Notfalls nachfassen per `workflow_dispatch` (Eingaben `tag`,
