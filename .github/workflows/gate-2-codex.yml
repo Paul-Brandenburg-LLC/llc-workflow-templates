@@ -539,16 +539,33 @@ jobs:
           # Beweis: scripts/gate-2-verdict-selftest.sh (Faelle V1-V9).
           eval_body() {  # $1=body  $2=offene Codex-Befund-Threads (leer=unbekannt)
                          #   → echoes success|failure|"" (kein erkennbares Verdict)
-            if echo "$1" | grep -qE '### Integrations-Befunde|### Findings|🚨|\*\*P[01]\*\*'; then echo failure
-            elif echo "$1" | grep -qF '<!-- codex-pull-request-review-summary -->'; then
-              # $2 = offene (nicht aufgeloeste) Codex-Befund-Threads (Zahl; LEER = unbekannt).
-              # Reihenfolge: unbekannt schlaegt alles, dann Befunde, dann der
-              # abgeschlossene Lauf. "Completed" allein ist KEIN Freigabesignal.
-              if [ -z "${2:-}" ]; then echo ""
-              elif [ "$2" -gt 0 ]; then echo failure
-              # Nur die Zeile(n) des aktuellen HEAD betrachten; ein abgeschlossener
-              # Lauf eines ANDEREN Commits sagt ueber diesen HEAD nichts.
-              elif echo "$1" | grep -F -e "$HEAD_SHA" -e "$SHORT_SHA" | grep -qF '**Completed**'; then echo success
+            # (a) Befund-Marker im Body schlagen alles.
+            if echo "$1" | grep -qE '### Integrations-Befunde|### Findings|🚨|\*\*P[01]\*\*'; then echo failure; return; fi
+            # (b) ⛔ Der Thread-Riegel steht VOR JEDEM erfolgliefernden Zweig
+            #     (Vorpruefung P1, Runde 11). Er hing zuvor NUR im Summary-Zweig;
+            #     ein Body in einer der Legacy-Formen (`### Codex Review`,
+            #     `### 💡 Codex Review`, `Codex Review: …`) lieferte deshalb
+            #     `success`, obwohl offene Zeilenbefunde am HEAD hingen —
+            #     dieselbe Irrtumsrichtung wie in Runde 3, nur eine Verzweigung
+            #     weiter unten. Kein Body-Format darf an dieser Pruefung vorbei.
+            #     $2 = offene (nicht aufgeloeste) Codex-Befund-Threads (Zahl;
+            #     LEER = unbekannt). Reihenfolge: unbekannt schlaegt alles, dann
+            #     Befunde. "Completed" allein ist KEIN Freigabesignal.
+            if [ -z "${2:-}" ]; then echo ""; return; fi
+            if [ "$2" -gt 0 ]; then echo failure; return; fi
+            # (c) Erst hier ist die Zahl BEKANNT und NULL.
+            if echo "$1" | grep -qF '<!-- codex-pull-request-review-summary -->'; then
+              # Drei Merkmale, alle auf DERSELBEN Tabellenzeile:
+              #   - der aktuelle HEAD (ein abgeschlossener Lauf eines ANDEREN
+              #     Commits sagt ueber diesen HEAD nichts),
+              #   - `**Code Review**` (Vorpruefung P1, Runde 11: die Summary
+              #     traegt je Review-ART eine eigene Zeile — ein abgeschlossenes
+              #     Security Review haette sonst das Tor geoeffnet, waehrend das
+              #     Code Review am selben Commit noch `Running` stand),
+              #   - `**Completed**`.
+              # Fehlt eines davon, bleibt es `pending` — die Irrtumsrichtung
+              # zeigt auf "zu vorsichtig", nie auf "zu gruen".
+              if echo "$1" | grep -F -e "$HEAD_SHA" -e "$SHORT_SHA" | grep -F '**Code Review**' | grep -qF '**Completed**'; then echo success
               else echo ""; fi
             elif echo "$1" | grep -qE '^### 💡 Codex Review|^### Codex Review|^Codex Review: '; then echo success
             else echo ""; fi

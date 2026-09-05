@@ -120,9 +120,35 @@ die Bruecke nichts zu suchen.
 Uebergang ein Ereignis benennen koennen, das die Konsumenten wirklich
 abonnieren.
 
+## Die sechste und siebte falsche Reparatur (Vorpruefung P1, Runde 11)
+
+Beide zeigen wieder in dieselbe Richtung — **zu gruen** — und beide sassen in
+Zweigen, die die vorigen Runden nicht erreicht hatten:
+
+**6. Der Thread-Riegel hing nur im Summary-Zweig.** `eval_body()` prueft die
+Zahl offener Codex-Befund-Threads; diese Pruefung stand aber INNERHALB des
+Summary-Marker-Zweigs. Ein Body in einer der Legacy-Formen (`### Codex Review`,
+`### 💡 Codex Review`, `Codex Review: …`) lief daran vorbei und lieferte
+`success`, obwohl offene Zeilenbefunde am HEAD hingen — genau der Fehler aus
+Runde 3, eine Verzweigung tiefer. Der Riegel steht jetzt **vor jedem
+erfolgliefernden Zweig**: unbekannte Zahl → `pending`, Zahl > 0 → `failure`,
+und erst danach wird ueberhaupt ein Body-Format gelesen.
+
+**7. Ein abgeschlossenes Security Review oeffnete das Tor.** Die Summary-Tabelle
+traegt **je Review-ART eine eigene Zeile**. Die Pruefung lautete „irgendeine
+Zeile mit dem aktuellen SHA traegt `**Completed**`" — ein fertiges Security
+Review gab damit frei, waehrend das Code Review am selben Commit noch `Running`
+stand. Verlangt werden jetzt alle drei Merkmale auf **derselben** Zeile: der
+HEAD-SHA, `**Code Review**` und `**Completed**`. Fehlt eines, bleibt es
+`pending`.
+
+**Die Regel dahinter:** Ein Riegel, der in EINEM Zweig sitzt, ist kein Riegel —
+er gehoert vor die Verzweigung. Und eine Tabelle mit mehreren Zeilen misst man
+zeilenweise, nie ueber das ganze Dokument.
+
 ## Nachweis (§7)
 
-- `scripts/gate-2-verdict-selftest.sh` — **NEU**, 32 Faelle, alle gruen.
+- `scripts/gate-2-verdict-selftest.sh` — **NEU**, 37 Faelle, alle gruen.
   Zieht `eval_body()` **im Ganzen** aus der Workflow-Datei und fuehrt sie aus,
   statt sie abzuschreiben; deshalb kann er nicht gruen bleiben, wenn jemand die
   Datei zurueckdreht. Enthaelt fuenf Struktur-Proben, die nicht das Verhalten,
@@ -133,9 +159,12 @@ abonnieren.
   bleibt). Alle ziehen die Bedingung per `awk` aus der Datei und lassen
   **Kommentarzeilen aus** — ueber dem `if` steht die Begruendung, und die
   zitiert die alte Fassung woertlich; ein `grep` ueber die Rohdatei traefe sie.
-- **Gegen den alten Stand rot belegt: 19/32** (13 Fehlschlaege gegen
-  `origin/main`; gegen `712ec11`, den direkten Vorgaenger des Job-`if`-Fixes,
-  genau die zwei neuen S3 und S5).
+- **Gegen den alten Stand rot belegt: 20/37** (17 Fehlschlaege gegen
+  `origin/main`). Jede Erweiterung ist zusaetzlich gegen ihren DIREKTEN
+  Vorgaenger rotgestellt, damit der Beleg nicht in der Masse untergeht: gegen
+  `712ec11` genau die zwei neuen S3 und S5, gegen `dcf6169` genau die vier
+  neuen Faelle V14-V16 (die Gegenprobe „beide Review-Arten fertig" bleibt dort
+  gruen — sie misst, dass die Fixture nicht generell kaputt ist).
   `git show <sha>:.github/workflows/gate-2-codex.yml > /tmp/alt.yml && GATE2_WORKFLOW=/tmp/alt.yml bash scripts/gate-2-verdict-selftest.sh`
 - `scripts/gate-2-threads-selftest.sh` — **NEU**, 20 Faelle, alle gruen. Zieht
   den Zaehl-Ausdruck ebenfalls **im Ganzen** aus der Workflow-Datei. Enthaelt

@@ -178,6 +178,37 @@ V=$(eval_body "$SUM_OK");    check "completed+arg-fehlt→pending" "" "$V"
 V=$(eval_body "$(summary '🔄 **Running**' "$SHORT_SHA")" 2)
 check "running+offene-befunde→failure" failure "$V"
 
+# --- V14-V16: DIE BEIDEN P1-LOECHER AUS RUNDE 11 -----------------------------
+
+# V14) Der Thread-Riegel hing nur im Summary-Zweig. Ein Body in einer der
+#      LEGACY-Formen lief daran vorbei und lieferte `success`, obwohl offene
+#      Zeilenbefunde am HEAD hingen. Dieselbe Irrtumsrichtung wie Runde 3, nur
+#      eine Verzweigung tiefer.
+V=$(eval_body '### Codex Review' 3)
+check "legacy-banner+3-offene→failure (P1 R11)" failure "$V"
+V=$(eval_body 'Codex Review: no findings' 1)
+check "legacy-prefix+1-offener→failure (P1 R11)" failure "$V"
+
+# V15) Und unbekannt darf auch dort nie als "null Befunde" durchgehen.
+V=$(eval_body '### 💡 Codex Review' "")
+check "legacy-banner+unbekannt→pending (P1 R11)" "" "$V"
+
+# V16) Die Summary-Tabelle traegt JE REVIEW-ART eine Zeile. Ein abgeschlossenes
+#      Security Review am aktuellen HEAD oeffnete das Tor, waehrend das Code
+#      Review am selben Commit noch lief — die alte Pruefung sah nur "irgendeine
+#      Zeile mit dem SHA traegt Completed".
+ZWEI_ARTEN=$(printf '%s\n\n## Codex Review Summary\n\n| Review | Status | Commit |\n| --- | --- | --- |\n| 🔒 **Security Review** | ✅ **Completed** | `%s` | \n| 📝 **Code Review** | 🔄 **Running** | `%s` | \n' \
+  '<!-- codex-pull-request-review-summary -->' "$SHORT_SHA" "$SHORT_SHA")
+V=$(eval_body_0 "$ZWEI_ARTEN")
+check "security-fertig+code-review-laeuft→pending (P1 R11)" "" "$V"
+
+# Gegenprobe zu V16: sind BEIDE Arten am HEAD fertig, traegt die Summary.
+# Ohne sie koennte V16 auch bei einer generell kaputten Fixture gruen melden.
+ZWEI_FERTIG=$(printf '%s\n\n## Codex Review Summary\n\n| Review | Status | Commit |\n| --- | --- | --- |\n| 🔒 **Security Review** | ✅ **Completed** | `%s` | \n| 📝 **Code Review** | ✅ **Completed** | `%s` | \n' \
+  '<!-- codex-pull-request-review-summary -->' "$SHORT_SHA" "$SHORT_SHA")
+V=$(eval_body_0 "$ZWEI_FERTIG")
+check "beide-review-arten-fertig→success (Gegenprobe)" success "$V"
+
 echo "=== Abruf-Fehler darf nicht als 'null Befunde' gelten ==="
 
 # A1) Die Demonstration der Falle (Vorpruefung P1, Runde 4): der jq-Filter
