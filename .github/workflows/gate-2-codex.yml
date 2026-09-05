@@ -537,23 +537,20 @@ jobs:
           # `**Completed**` traegt, ist ein Urteil. Alles andere bleibt `pending` —
           # die Irrtumsrichtung zeigt damit auf „zu vorsichtig", nie auf „zu gruen".
           # Beweis: scripts/gate-2-verdict-selftest.sh (Faelle V1-V9).
-          eval_body() {  # $1=body  $2=offene Codex-Befund-Threads (leer=unbekannt)
+          eval_body() {  # $1=body
                          #   → echoes success|failure|"" (kein erkennbares Verdict)
+            # ⛔ Diese Funktion beurteilt AUSSCHLIESSLICH den Body.
+            #    Die Zahl offener Codex-Befund-Threads ist keine Eigenschaft des
+            #    Bodys. Sie hing hier einmal als zweites Argument — und wurde
+            #    dreimal umgangen (Vorpruefung Runden 3, 11, 12), weil jeder
+            #    neue Erfolgszweig sie erneut haette mitpruefen muessen. Der
+            #    Riegel steht deshalb jetzt genau EINMAL, oberhalb der ganzen
+            #    Kette. ⛔ Ihn hier wieder einzubauen waere ein Rueckschritt:
+            #    dann gaebe es zwei Wahrheiten, die auseinanderlaufen koennen.
+            #
             # (a) Befund-Marker im Body schlagen alles.
             if echo "$1" | grep -qE '### Integrations-Befunde|### Findings|🚨|\*\*P[01]\*\*'; then echo failure; return; fi
-            # (b) ⛔ Der Thread-Riegel steht VOR JEDEM erfolgliefernden Zweig
-            #     (Vorpruefung P1, Runde 11). Er hing zuvor NUR im Summary-Zweig;
-            #     ein Body in einer der Legacy-Formen (`### Codex Review`,
-            #     `### 💡 Codex Review`, `Codex Review: …`) lieferte deshalb
-            #     `success`, obwohl offene Zeilenbefunde am HEAD hingen —
-            #     dieselbe Irrtumsrichtung wie in Runde 3, nur eine Verzweigung
-            #     weiter unten. Kein Body-Format darf an dieser Pruefung vorbei.
-            #     $2 = offene (nicht aufgeloeste) Codex-Befund-Threads (Zahl;
-            #     LEER = unbekannt). Reihenfolge: unbekannt schlaegt alles, dann
-            #     Befunde. "Completed" allein ist KEIN Freigabesignal.
-            if [ -z "${2:-}" ]; then echo ""; return; fi
-            if [ "$2" -gt 0 ]; then echo failure; return; fi
-            # (c) Erst hier ist die Zahl BEKANNT und NULL.
+            # (b) Sonst entscheidet die Form des Bodys.
             if echo "$1" | grep -qF '<!-- codex-pull-request-review-summary -->'; then
               # Drei Merkmale, alle auf DERSELBEN Tabellenzeile:
               #   - der aktuelle HEAD (ein abgeschlossener Lauf eines ANDEREN
@@ -571,46 +568,69 @@ jobs:
             else echo ""; fi
           }
 
-          if [ -n "$REVIEW_SHA" ] && [ "$REVIEW_SHA" = "$HEAD_SHA" ]; then
-            # (1) Formales Review gegen den aktuellen HEAD — verbindlich.
-            if [ "$REVIEW_STATE" = "APPROVED" ]; then
-              STATE=success; DESC="Codex approved HEAD"
-            elif [ "$REVIEW_STATE" = "CHANGES_REQUESTED" ]; then
-              STATE=failure; DESC="Codex requests changes (HEAD)"
-            else
-              V=$(eval_body "$REVIEW_BODY" "$CODEX_OFFEN")
-              [ "$V" = failure ] && { STATE=failure; DESC="Codex findings (HEAD)"; }
-              [ "$V" = success ] && { STATE=success; DESC="Codex review (HEAD): no findings"; }
-            fi
-          fi
-
-          # (2) Kommentar-Fallback — nur wenn er den aktuellen HEAD-SHA explizit nennt.
+          # ⛔⛔ DER THREAD-RIEGEL STEHT VOR DER GESAMTEN URTEILSKETTE.
           #
-          # ⛔ Das haengt bewusst NICHT als `elif` am Review-Zweig (Vorpruefung P1,
-          # Runde 6). Codex hinterlaesst zu einem Review regelmaessig ein formales
-          # `COMMENTED` OHNE Body — die Befunde stehen in den Zeilen-Threads, das
-          # Urteil im Summary-Kommentar. Als `elif` war die Kette damit
-          # verschluckt: der Review-Zweig traf zu, `eval_body("")` lieferte kein
-          # Verdict, `STATE` blieb `pending`, und der Summary wurde nie gelesen.
-          # Das Tor haette nach dem Aufloesen der Befunde dauerhaft auf `pending`
-          # gestanden. Ein formales Review mit klarem Urteil (APPROVED /
-          # CHANGES_REQUESTED / Body mit Verdict) bleibt dagegen verbindlich —
-          # dann steht `STATE` nicht mehr auf `pending` und dieser Zweig laeuft
-          # gar nicht erst.
-          if [ "$STATE" = pending ] && [ -n "$COMMENT_BODY" ] && echo "$COMMENT_BODY" | grep -qF -e "$HEAD_SHA" -e "$SHORT_SHA"; then
-            V=$(eval_body "$COMMENT_BODY" "$CODEX_OFFEN")
-            [ "$V" = failure ] && { STATE=failure; DESC="Codex findings (comment@HEAD)"; }
-            [ "$V" = success ] && { STATE=success; DESC="Codex comment (HEAD): no findings"; }
-            # Offene Zeilenbefunde sind hier der haeufigste Grund fuer failure —
-            # sie im Text benennen, sonst sucht man sie im Kommentar-Body.
+          # Dreimal hat die Vorpruefung dieselbe Klasse an drei verschiedenen
+          # Stellen gefunden: Runde 3 im Summary-Zweig, Runde 11 im
+          # Legacy-Zweig, Runde 12 an `APPROVED` — das setzte `success` direkt
+          # und ging damit auch am Riegel INNERHALB von `eval_body()` vorbei.
+          # Ein Riegel, der IN einem Zweig sitzt, wird vom naechsten Zweig
+          # umgangen; er gehoert eine Ebene HOEHER als jeder erfolgliefernde
+          # Pfad. Beim dritten Mal wird er nicht noch einmal nachgebaut,
+          # sondern UEBERNOMMEN: er steht jetzt genau einmal, hier, bevor
+          # ueberhaupt ein Review oder ein Kommentar gelesen wird.
+          # ⛔ Ihn zusaetzlich wieder in `eval_body()` einzubauen waere ein
+          # Rueckschritt — dann gaebe es zwei Wahrheiten.
+          #
+          # Beweis: gate-2-chain-selftest.sh (K10-K13, Verhalten) und die
+          # Struktur-Probe S6 in gate-2-verdict-selftest.sh, die erzwingt, dass
+          # kein `STATE=success` je VOR diesem Riegel steht.
+          if [ -z "$CODEX_OFFEN" ]; then
+            # Unbekannt ist nicht null. Ist der Abruf oder die Auswertung
+            # gescheitert, bleibt es bei `pending` — gleich, wie gruen Review
+            # oder Kommentar aussehen.
+            DESC="Codex-Befund-Threads unbekannt — Gate bleibt pending"
+          elif [ "$CODEX_OFFEN" -gt 0 ]; then
             # Der Text ist der einzige Ort, an dem der Weg heraus steht: das
             # Aufloesen allein loest keinen Lauf aus (P1 Runde 9, s. Job-`if`).
-            if [ "$V" = failure ] && [ -n "$CODEX_OFFEN" ] && [ "$CODEX_OFFEN" -gt 0 ]; then
-              DESC="$CODEX_OFFEN offene Codex-Befunde — aufloesen, dann PR-Kommentar (rechnet neu)"
+            STATE=failure
+            DESC="$CODEX_OFFEN offene Codex-Befunde — aufloesen, dann PR-Kommentar (rechnet neu)"
+          else
+            if [ -n "$REVIEW_SHA" ] && [ "$REVIEW_SHA" = "$HEAD_SHA" ]; then
+              # (1) Formales Review gegen den aktuellen HEAD — verbindlich.
+              if [ "$REVIEW_STATE" = "APPROVED" ]; then
+                STATE=success; DESC="Codex approved HEAD"
+              elif [ "$REVIEW_STATE" = "CHANGES_REQUESTED" ]; then
+                STATE=failure; DESC="Codex requests changes (HEAD)"
+              else
+                V=$(eval_body "$REVIEW_BODY")
+                [ "$V" = failure ] && { STATE=failure; DESC="Codex findings (HEAD)"; }
+                [ "$V" = success ] && { STATE=success; DESC="Codex review (HEAD): no findings"; }
+              fi
             fi
+
+            # (2) Kommentar-Fallback — nur wenn er den aktuellen HEAD-SHA explizit nennt.
+            #
+            # ⛔ Das haengt bewusst NICHT als `elif` am Review-Zweig (Vorpruefung P1,
+            # Runde 6). Codex hinterlaesst zu einem Review regelmaessig ein formales
+            # `COMMENTED` OHNE Body — die Befunde stehen in den Zeilen-Threads, das
+            # Urteil im Summary-Kommentar. Als `elif` war die Kette damit
+            # verschluckt: der Review-Zweig traf zu, `eval_body("")` lieferte kein
+            # Verdict, `STATE` blieb `pending`, und der Summary wurde nie gelesen.
+            # Das Tor haette nach dem Aufloesen der Befunde dauerhaft auf `pending`
+            # gestanden. Ein formales Review mit klarem Urteil (APPROVED /
+            # CHANGES_REQUESTED / Body mit Verdict) bleibt dagegen verbindlich —
+            # dann steht `STATE` nicht mehr auf `pending` und dieser Zweig laeuft
+            # gar nicht erst.
+            if [ "$STATE" = pending ] && [ -n "$COMMENT_BODY" ] && echo "$COMMENT_BODY" | grep -qF -e "$HEAD_SHA" -e "$SHORT_SHA"; then
+              V=$(eval_body "$COMMENT_BODY")
+              [ "$V" = failure ] && { STATE=failure; DESC="Codex findings (comment@HEAD)"; }
+              [ "$V" = success ] && { STATE=success; DESC="Codex comment (HEAD): no findings"; }
+            fi
+            # Andernfalls bleibt STATE=pending → Codex re-reviewt den neuen HEAD via Integration;
+            # das folgende pull_request_review-Event lässt diese Bridge erneut laufen.
           fi
-          # Andernfalls bleibt STATE=pending → Codex re-reviewt den neuen HEAD via Integration;
-          # das folgende pull_request_review-Event lässt diese Bridge erneut laufen.
+
           echo "state=$STATE" >> "$GITHUB_OUTPUT"
           echo "desc=$DESC" >> "$GITHUB_OUTPUT"
 

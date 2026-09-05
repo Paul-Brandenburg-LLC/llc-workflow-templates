@@ -67,9 +67,13 @@ HEAD_SHA="2528273880dc8d48e29da855fd22340f9595c784"
 SHORT_SHA="${HEAD_SHA:0:7}"
 FREMD_SHA="9999999"
 
-# Bequemlichkeit: die Altfaelle messen die Body-Erkennung bei NULL offenen
-# Zeilenbefunden. Die Befundzahl selbst pruefen V10-V13 ausdruecklich.
-eval_body_0() { eval_body "$1" 0; }
+# Seit Runde 12 ist die Befundzahl KEIN Argument von eval_body() mehr: der
+# Riegel steht oberhalb der ganzen Kette, nicht in der Body-Beurteilung (er war
+# dreimal umgangen worden — Runden 3, 11, 12). Die Faelle dazu misst deshalb
+# gate-2-chain-selftest.sh (K6, K9, K10-K13), wo die Kette wirklich laeuft.
+# Der Helfer bleibt nur als Name stehen, damit die Body-Faelle unten lesbar
+# bleiben.
+eval_body_0() { eval_body "$1"; }
 
 PASS=0; FAIL=0
 check() { # $1=name  $2=expected  $3=actual
@@ -157,41 +161,14 @@ V=$(eval_body_0 'Danke fuer den PR!'); check "fremdkommentar-kein-verdict" "" "$
 V=$(eval_body_0 'siehe die Codex Review Summary von gestern'); check "banner-nur-am-zeilenanfang" "" "$V"
 V=$(eval_body_0 'ich zitiere: Codex Review: alles gut'); check "prefix-nur-am-zeilenanfang" "" "$V"
 
-# --- V10-V12: DAS P1-LOCH AUS RUNDE 3 ---------------------------------------
-# `**Completed**` heisst nur "Lauf beendet". Liegen offene Zeilenbefunde am
-# HEAD, ist das ein failure — egal wie gruen die Summary aussieht.
-SUM_OK="$(summary '✅ **Completed**' "$SHORT_SHA")"
+# Die Faelle zur BEFUNDZAHL (offen / unbekannt) standen bis Runde 12 hier und
+# messen jetzt dort, wo der Riegel wirklich sitzt: gate-2-chain-selftest.sh,
+# K6 (offen), K9 (unbekannt), K10-K13 (auch an APPROVED und am Legacy-Banner
+# vorbei). Sie hier zu belassen haette die Illusion erhalten, eval_body() sei
+# die Stelle, die den Merge absichert — genau die Illusion, die dreimal ein P1
+# gekostet hat.
 
-# V10) Ein offener Zeilenbefund schlaegt die abgeschlossene Summary
-V=$(eval_body "$SUM_OK" 1); check "completed+1-offener-befund→failure (P1 R3)" failure "$V"
-V=$(eval_body "$SUM_OK" 6); check "completed+6-offene-befunde→failure" failure "$V"
-
-# V11) Null offene Befunde — erst dann traegt die abgeschlossene Summary
-V=$(eval_body "$SUM_OK" 0); check "completed+0-offene-befunde→success" success "$V"
-
-# V12) UNBEKANNT (Abruf gescheitert) darf NIE als "null Befunde" gelten.
-#      Leerer Wert → pending, nicht success.
-V=$(eval_body "$SUM_OK" ""); check "completed+unbekannt→pending" "" "$V"
-V=$(eval_body "$SUM_OK");    check "completed+arg-fehlt→pending" "" "$V"
-
-# V13) Offene Befunde schlagen auch einen LAUFENDEN Lauf — failure vor pending
-V=$(eval_body "$(summary '🔄 **Running**' "$SHORT_SHA")" 2)
-check "running+offene-befunde→failure" failure "$V"
-
-# --- V14-V16: DIE BEIDEN P1-LOECHER AUS RUNDE 11 -----------------------------
-
-# V14) Der Thread-Riegel hing nur im Summary-Zweig. Ein Body in einer der
-#      LEGACY-Formen lief daran vorbei und lieferte `success`, obwohl offene
-#      Zeilenbefunde am HEAD hingen. Dieselbe Irrtumsrichtung wie Runde 3, nur
-#      eine Verzweigung tiefer.
-V=$(eval_body '### Codex Review' 3)
-check "legacy-banner+3-offene→failure (P1 R11)" failure "$V"
-V=$(eval_body 'Codex Review: no findings' 1)
-check "legacy-prefix+1-offener→failure (P1 R11)" failure "$V"
-
-# V15) Und unbekannt darf auch dort nie als "null Befunde" durchgehen.
-V=$(eval_body '### 💡 Codex Review' "")
-check "legacy-banner+unbekannt→pending (P1 R11)" "" "$V"
+# --- V16: DAS ZWEITE P1-LOCH AUS RUNDE 11 ------------------------------------
 
 # V16) Die Summary-Tabelle traegt JE REVIEW-ART eine Zeile. Ein abgeschlossenes
 #      Security Review am aktuellen HEAD oeffnete das Tor, waehrend das Code
@@ -379,6 +356,51 @@ if [ -z "$S5_FEHLT" ]; then
   PASS=$((PASS+1))
 else
   echo "  FAIL [job-if-behaelt-pr-waechter] → fehlt:$S5_FEHLT"
+  FAIL=$((FAIL+1))
+fi
+
+echo "=== Kette: der Riegel steht vor jedem Erfolgszweig (S6/S7) ==="
+
+# Dreimal ist dieselbe Klasse durchgerutscht (Vorpruefung Runden 3, 11, 12):
+# ein Riegel, der IN einem Zweig sitzt, wird vom naechsten Zweig umgangen.
+# Beim dritten Mal hilft keine groessere Sorgfalt, sondern ein Waechter, der
+# die Klasse strukturell ausschliesst: im Kettenblock darf KEIN `STATE=success`
+# vor dem CODEX_OFFEN-Riegel stehen.
+riegel_vor_success() { # $1=Kettenblock → 0 = Riegel zuerst, 1 = success zuerst,
+                       #                  2 = eines von beiden nicht auffindbar
+  local code riegel erfolg
+  code="$(printf '%s\n' "$1" | grep -vE '^[[:space:]]*#')"
+  riegel="$(printf '%s\n' "$code" | grep -n -m1 'CODEX_OFFEN' | cut -d: -f1)"
+  erfolg="$(printf '%s\n' "$code" | grep -n -m1 'STATE=success' | cut -d: -f1)"
+  [ -n "$riegel" ] && [ -n "$erfolg" ] || return 2
+  [ "$riegel" -lt "$erfolg" ]
+}
+
+KETTE_BLOCK="$(awk '/^[[:space:]]*STATE=pending[[:space:]]*$/{f=1} f{print} f && /state=\$STATE/{exit}' "$WF")"
+[ -n "$KETTE_BLOCK" ] || { echo "FATAL: Kettenblock nicht auffindbar in $WF"; exit 1; }
+
+# S6) Der gemessene Stand.
+riegel_vor_success "$KETTE_BLOCK"; S6=$?
+case "$S6" in
+  0) echo "  ok   [riegel-steht-vor-jedem-erfolgszweig]"; PASS=$((PASS+1)) ;;
+  1) echo "  FAIL [riegel-steht-vor-jedem-erfolgszweig] → ein STATE=success steht VOR dem CODEX_OFFEN-Riegel"; FAIL=$((FAIL+1)) ;;
+  *) echo "  FAIL [riegel-steht-vor-jedem-erfolgszweig] → Riegel oder Erfolgszweig nicht auffindbar"; FAIL=$((FAIL+1)) ;;
+esac
+
+# S7) Gegenprobe: die alte Anordnung (APPROVED setzt success, der Riegel liegt
+#     erst darunter in eval_body) MUSS anschlagen. Ohne sie meldete S6 auch
+#     dann gruen, wenn die Messung gar nichts mehr trifft.
+ALT_ANORDNUNG='STATE=pending
+if [ "$REVIEW_STATE" = "APPROVED" ]; then
+  STATE=success
+fi
+V=$(eval_body "$COMMENT_BODY" "$CODEX_OFFEN")
+state=$STATE'
+riegel_vor_success "$ALT_ANORDNUNG"; S7=$?
+if [ "$S7" = 1 ]; then
+  echo "  ok   [gegenprobe-alte-anordnung-schlaegt-an]"; PASS=$((PASS+1))
+else
+  echo "  FAIL [gegenprobe-alte-anordnung-schlaegt-an] → rc=$S7; die Messung trifft die alte Anordnung nicht"
   FAIL=$((FAIL+1))
 fi
 

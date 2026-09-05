@@ -159,6 +159,28 @@ pruefe "K8 Review an fremdem SHA + Summary am HEAD" \
 pruefe "K9 offene Befunde unbekannt (leer)" \
   pending "$(kette "$HEAD_SHA" COMMENTED "" "$SUM_FERTIG" "")"
 
+# K10-K13 — der Riegel steht seit Runde 12 VOR der ganzen Kette (Vorpruefung
+# P1). Vorher sass er in `eval_body()`, und `APPROVED` setzte `success` direkt,
+# also daran vorbei: ein Approval gab gruen, obwohl Codex-Befunde offen waren
+# oder die Zahl gar nicht abrufbar war.
+pruefe "K10 APPROVED am HEAD + 2 offene Befunde" \
+  failure "$(kette "$HEAD_SHA" APPROVED "" "" 2)"
+
+pruefe "K11 APPROVED am HEAD + Befundzahl unbekannt" \
+  pending "$(kette "$HEAD_SHA" APPROVED "" "" "")"
+
+# K12 — auch die Legacy-Bannerform im Review-Body kommt nicht vorbei (P1 R11).
+pruefe "K12 Legacy-Banner im Review-Body + 1 offener Befund" \
+  failure "$(kette "$HEAD_SHA" COMMENTED '### Codex Review' "" 1)"
+
+# K13 — bewusst festgehalten: ist die Zahl UNBEKANNT, entscheidet die Kette gar
+# nichts mehr, auch kein rotes Urteil. `CHANGES_REQUESTED` endet dann auf
+# `pending` statt `failure`. Beide blockieren den Merge; die Irrtumsrichtung
+# bleibt "zu vorsichtig". Der Fall steht hier, damit die Aenderung sichtbar ist
+# und nicht unbemerkt zurueckkippt.
+pruefe "K13 CHANGES_REQUESTED + Befundzahl unbekannt → pending" \
+  pending "$(kette "$HEAD_SHA" CHANGES_REQUESTED "" "" "")"
+
 # ---------------------------------------------------------------------------
 # 2) Gegenprobe: die Fixture von K1 trifft den Befund wirklich
 # ---------------------------------------------------------------------------

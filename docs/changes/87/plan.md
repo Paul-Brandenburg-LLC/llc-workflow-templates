@@ -146,6 +146,30 @@ HEAD-SHA, `**Code Review**` und `**Completed**`. Fehlt eines, bleibt es
 er gehoert vor die Verzweigung. Und eine Tabelle mit mehreren Zeilen misst man
 zeilenweise, nie ueber das ganze Dokument.
 
+## Die achte falsche Reparatur (Vorpruefung P1, Runde 12)
+
+**`APPROVED` umging den Thread-Riegel.** Der Riegel sass in `eval_body()`, aber
+ein formales `APPROVED`-Review setzt `STATE=success` **direkt** — es liest gar
+keinen Body. Ein Approval gab damit gruen, obwohl Codex-Befunde offen waren
+oder die Zahl nicht abrufbar war.
+
+Damit war es dreimal dieselbe Klasse an drei verschiedenen Stellen (Runde 3 im
+Summary-Zweig, Runde 11 im Legacy-Zweig, Runde 12 an `APPROVED`). Beim dritten
+Mal wird die Regel nicht ein viertes Mal nachgebaut, sondern **uebernommen**:
+der Riegel steht jetzt genau **einmal**, oberhalb der gesamten Urteilskette —
+unbekannte Zahl → `pending`, Zahl > 0 → `failure`, und nur bei bekannt-null
+laeuft die Kette ueberhaupt. `eval_body()` beurteilt seitdem ausschliesslich
+den Body und hat kein zweites Argument mehr.
+
+Dazu ein **Struktur-Waechter** statt mehr Sorgfalt (S6/S7 in
+`gate-2-verdict-selftest.sh`): im Kettenblock darf kein `STATE=success` vor dem
+`CODEX_OFFEN`-Riegel stehen — mit Gegenprobe an der alten Anordnung, damit die
+Messung nicht ins Leere greift.
+
+**Die Regel dahinter:** Rutscht dieselbe Luecke dreimal durch, ist nicht die
+Sorgfalt zu klein, sondern die Stelle falsch. Ein geteilter Zustand wandert
+eine Ebene hoeher — und dorthin gehoert dann ein Waechter, kein Kommentar.
+
 ## Nachweis (§7)
 
 - `scripts/gate-2-verdict-selftest.sh` — **NEU**, 37 Faelle, alle gruen.
