@@ -190,6 +190,20 @@ while IFS= read -r treffer; do
   # Erlaubnis- und keine Verbotsliste: eine Aufzaehlung gefaehrlicher jq-Operatoren
   # waere umgehbar, sobald jemand `.[-1]`, `limit(...)` oder `to_entries` nutzt.
   printf '%s' "$zeile" | grep -qF -- '--paginate' || continue
+
+  # Getrennter Abruf (llc-ops-backlog#87): `VAR=$(gh api --paginate …)` prueft
+  # den Exitcode und wertet erst DANACH aus. Das ist strenger als die Pipe —
+  # eine Pipe verschluckt den Abruffehler, weil `jq` auf leerer Eingabe `0`
+  # liefert und mit Exitcode 0 endet. Die Zusammenfuehrung steht dann nicht auf
+  # der `gh api`-Zeile, sondern auf der Zeile, die die Variable auswertet.
+  # Anerkannt wird das NUR, wenn dort tatsaechlich `jq -s`/`--slurp` steht —
+  # die Zusage bleibt dieselbe, nur ihre Fundstelle verschiebt sich.
+  zuweisung=$(printf '%s' "$zeile" | sed -nE 's/.*[^A-Za-z0-9_]([A-Za-z_][A-Za-z0-9_]*)=\$\(gh api[[:space:]].*/\1/p')
+  if [ -n "$zuweisung" ] && grep -E -- "\\\$\\{?${zuweisung}\\}?" "$datei" | grep -qE -- 'jq [^|]*-[a-zA-Z]*s[a-zA-Z]*\b|--slurp'; then
+    ok "$datei:$nr — /$segment: Abruf getrennt geprueft, Seiten bei der Auswertung von \$$zuweisung zusammengefuehrt (jq -s)"
+    continue
+  fi
+
   if printf '%s' "$zeile" | grep -qE -- '--jq|--template'; then
     fail "$datei:$nr — --paginate zusammen mit --jq/--template (Filter laeuft je SEITE); Seiten stattdessen mit 'jq -s \"(add // []) | …\"' zusammenfuehren"
   elif printf '%s' "$zeile" | grep -qE -- 'jq [^|]*-[a-zA-Z]*s[a-zA-Z]*\b|--slurp'; then

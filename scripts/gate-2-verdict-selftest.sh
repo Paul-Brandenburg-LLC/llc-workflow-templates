@@ -209,9 +209,17 @@ else
   echo "  FAIL [abruf-exitcode-wird-geprueft] → gh api haengt ungeprueft an jq"; FAIL=$((FAIL+1))
 fi
 
-# A3) Gegenprobe zu A2: `gh api` darf im Block NICHT direkt in `jq` laufen.
-if printf '%s' "$OFFEN_BLOCK" | grep -A1 'gh api --paginate' | grep -q '| jq'; then
-  echo "  FAIL [kein-direkter-pipe-gh-nach-jq] → der stille Fehlerfall ist zurueck"; FAIL=$((FAIL+1))
+# A3) Gegenprobe zu A2: die `gh api`-ANWEISUNG selbst darf nicht in `jq`
+#     laufen — samt ihrer Backslash-Fortsetzungen. Nur die eigene Anweisung
+#     zaehlt: dass die FOLGE-Anweisung die Variable durch `jq -s` schickt, ist
+#     genau der gewollte Zustand und darf hier nicht als Verstoss gelten.
+GH_ANWEISUNG="$(printf '%s\n' "$OFFEN_BLOCK" | awk '
+  /gh api --paginate/ { z=$0; while (z ~ /\\[[:space:]]*$/ && (getline n) > 0) { sub(/\\[[:space:]]*$/, "", z); z = z " " n }
+                        print z; exit }')"
+if [ -z "$GH_ANWEISUNG" ]; then
+  echo "  FAIL [kein-direkter-pipe-gh-nach-jq] → gh-api-Anweisung nicht auffindbar"; FAIL=$((FAIL+1))
+elif printf '%s' "$GH_ANWEISUNG" | grep -q '| *jq'; then
+  echo "  FAIL [kein-direkter-pipe-gh-nach-jq] → der stille Fehlerfall ist zurueck: $GH_ANWEISUNG"; FAIL=$((FAIL+1))
 else
   echo "  ok   [kein-direkter-pipe-gh-nach-jq]"; PASS=$((PASS+1))
 fi

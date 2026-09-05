@@ -422,8 +422,7 @@ jobs:
           # Gate bleibt `pending`. Leer darf NIE als "null Befunde" gelesen werden.
           CODEX_OFFEN=""
           if COMMENTS_RAW=$(gh api --paginate "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" 2>"$RUNNER_TEMP/codex-comments.err"); then
-            CODEX_OFFEN=$(printf '%s' "$COMMENTS_RAW" \
-            | jq -s --arg head "$HEAD_SHA" '
+            CODEX_OFFEN=$(printf '%s' "$COMMENTS_RAW" | jq -s --arg head "$HEAD_SHA" '
                 (add // []) as $all
                 | ($all | map(select(.in_reply_to_id != null) | .in_reply_to_id) | unique) as $beantwortet
                 | [ $all[]
