@@ -19,11 +19,21 @@
 #      `pull_request_review`-Event, aber ein Review OHNE Befund existiert bei
 #      Codex nicht — es kommt nur eine 👍-Reaktion. Kein Event, Deadlock.
 #
-# ⛔ Die naheliegende Reparatur — die Ueberschrift auf `^#+` weiten — ist FALSCH
-# und wird hier aktiv ausgeschlossen (Fall V9): der Summary-Kommentar existiert
-# bereits, waehrend der Review noch LAEUFT; er wird nur editiert. Eine
-# Ueberschriften-Erkennung setzt das Tor bei „Running" auf `success` und gibt den
-# Merge VOR den Befunden frei (Codex-Vorpruefung P1, Runde 2).
+# ⛔ Zwei naheliegende Reparaturen sind FALSCH und werden hier aktiv
+# ausgeschlossen — beide stammen aus der Codex-Vorpruefung dieses Fixes:
+#
+#   (P1, Runde 2) Die Ueberschrift auf `^#+` weiten. Der Summary-Kommentar
+#   existiert bereits, waehrend der Review noch LAEUFT; er wird nur editiert.
+#   Eine Ueberschriften-Erkennung setzt das Tor bei „Running" auf `success` und
+#   gibt den Merge VOR den Befunden frei. Faelle V3/V4.
+#
+#   (P1, Runde 3) `**Completed**` als Freigabe lesen. Das heisst nur „Lauf
+#   beendet", NICHT „keine Befunde": an llc-ops-backlog#1147 stand die Summary
+#   fuer `2293878` auf Completed, waehrend sechs Zeilenbefunde offen waren.
+#   Befunde stehen NICHT im Kommentar-Body, sondern unter /pulls/N/comments —
+#   die Bruecke hat sie nie gelesen. Deshalb bekommt `eval_body()` die Zahl der
+#   OFFENEN (unbeantworteten) Zeilenbefunde am HEAD als zweites Argument.
+#   Faelle V10-V13.
 #
 # Die Funktion `eval_body()` wird AUS DER WORKFLOW-DATEI GELESEN und hier
 # ausgefuehrt, nicht abgeschrieben. Damit kann der Test nicht gruen bleiben, wenn
@@ -57,6 +67,10 @@ HEAD_SHA="2528273880dc8d48e29da855fd22340f9595c784"
 SHORT_SHA="${HEAD_SHA:0:7}"
 FREMD_SHA="9999999"
 
+# Bequemlichkeit: die Altfaelle messen die Body-Erkennung bei NULL offenen
+# Zeilenbefunden. Die Befundzahl selbst pruefen V10-V13 ausdruecklich.
+eval_body_0() { eval_body "$1" 0; }
+
 PASS=0; FAIL=0
 check() { # $1=name  $2=expected  $3=actual
   if [ "$2" = "$3" ]; then
@@ -82,24 +96,24 @@ echo "=== gate-2 verdict scenarios (eval_body aus $WF) ==="
 # Realer Codex-Summary aus nachrichtenmaschine-app#356: abgeschlossener Lauf
 # fuer den aktuellen HEAD. Gegen v1.1.2..v1.8.1 ergab das '' → pending →
 # Deadlock. Muss success sein.
-V=$(eval_body "$(summary '✅ **Completed**' "$SHORT_SHA")")
+V=$(eval_body_0 "$(summary '✅ **Completed**' "$SHORT_SHA")")
 check "summary-completed-am-HEAD (llc-ops-backlog#87)" success "$V"
 
 # V2) Voller 40-Zeichen-SHA in der Commit-Zelle zaehlt genauso
-V=$(eval_body "$(summary '✅ **Completed**' "$HEAD_SHA")")
+V=$(eval_body_0 "$(summary '✅ **Completed**' "$HEAD_SHA")")
 check "summary-completed-voller-sha" success "$V"
 
 # --- V9: DAS P1-LOCH (Vorpruefung Runde 2) ------------------------------------
 # Derselbe Kommentar, waehrend der Review noch laeuft. Der Marker und die
 # Ueberschrift stehen bereits da. Muss '' sein (Gate bleibt pending) — sonst
 # mergt der PR vor den Befunden.
-V=$(eval_body "$(summary '🔄 **Running**' "$SHORT_SHA")")
+V=$(eval_body_0 "$(summary '🔄 **Running**' "$SHORT_SHA")")
 check "summary-running-am-HEAD→pending (P1)" "" "$V"
-V=$(eval_body "$(summary '⏳ **Queued**' "$SHORT_SHA")")
+V=$(eval_body_0 "$(summary '⏳ **Queued**' "$SHORT_SHA")")
 check "summary-queued-am-HEAD→pending" "" "$V"
 
 # V3) Abgeschlossener Lauf eines FREMDEN Commits sagt ueber diesen HEAD nichts
-V=$(eval_body "$(summary '✅ **Completed**' "$FREMD_SHA")")
+V=$(eval_body_0 "$(summary '✅ **Completed**' "$FREMD_SHA")")
 check "summary-completed-fremder-commit→pending" "" "$V"
 
 # V4) Zwei Zeilen: fremder Commit fertig, HEAD laeuft noch → pending.
@@ -107,41 +121,62 @@ check "summary-completed-fremder-commit→pending" "" "$V"
 #     wuerde — die Status-Zelle muss ZUR HEAD-Zeile gehoeren.
 MIXED=$(printf '%s\n\n## Codex Review Summary\n\n| Review | Status | Commit |\n| --- | --- | --- |\n| 📝 **Code Review** | ✅ **Completed** | `%s` | \n| 📝 **Code Review** | 🔄 **Running** | `%s` | \n' \
   '<!-- codex-pull-request-review-summary -->' "$FREMD_SHA" "$SHORT_SHA")
-V=$(eval_body "$MIXED"); check "summary-fremd-fertig+HEAD-laeuft→pending" "" "$V"
+V=$(eval_body_0 "$MIXED"); check "summary-fremd-fertig+HEAD-laeuft→pending" "" "$V"
 
 # V5) Umgekehrt: fremder Commit laeuft, HEAD ist fertig → success
 MIXED2=$(printf '%s\n\n## Codex Review Summary\n\n| Review | Status | Commit |\n| --- | --- | --- |\n| 📝 **Code Review** | 🔄 **Running** | `%s` | \n| 📝 **Code Review** | ✅ **Completed** | `%s` | \n' \
   '<!-- codex-pull-request-review-summary -->' "$FREMD_SHA" "$SHORT_SHA")
-V=$(eval_body "$MIXED2"); check "summary-HEAD-fertig+fremd-laeuft→success" success "$V"
+V=$(eval_body_0 "$MIXED2"); check "summary-HEAD-fertig+fremd-laeuft→success" success "$V"
 
 # V6) Befunde schlagen alles — auch einen abgeschlossenen Summary
-V=$(eval_body "$(summary '✅ **Completed**' "$SHORT_SHA")
+V=$(eval_body_0 "$(summary '✅ **Completed**' "$SHORT_SHA")
 ### Findings
 - something")
 check "findings-schlagen-summary" failure "$V"
-V=$(eval_body "$(summary '✅ **Completed**' "$SHORT_SHA")
+V=$(eval_body_0 "$(summary '✅ **Completed**' "$SHORT_SHA")
 **P1** Datenverlust moeglich")
 check "P1-schlaegt-summary" failure "$V"
-V=$(eval_body "$(summary '✅ **Completed**' "$SHORT_SHA")
+V=$(eval_body_0 "$(summary '✅ **Completed**' "$SHORT_SHA")
 🚨 kritisch")
 check "alarm-schlaegt-summary" failure "$V"
 
 # V7) Die historisch bekannten Banner-Formen bleiben erkannt (Regressionsschutz)
-V=$(eval_body '### 💡 Codex Review
+V=$(eval_body_0 '### 💡 Codex Review
 
 Looks good.'); check "banner-emoji-bleibt" success "$V"
-V=$(eval_body '### Codex Review'); check "banner-3-rauten-bleibt" success "$V"
-V=$(eval_body 'Codex Review: no findings'); check "prefix-form-bleibt" success "$V"
+V=$(eval_body_0 '### Codex Review'); check "banner-3-rauten-bleibt" success "$V"
+V=$(eval_body_0 'Codex Review: no findings'); check "prefix-form-bleibt" success "$V"
 
 # V8) KEIN Verdict → '' (Status bleibt pending). URSPRUNGSFALL aus
 #     llc-ops-backlog#87: ein 'Codex usage limits'-Hinweis ist kein Urteil.
-V=$(eval_body 'Codex usage limits reached. Try again later.'); check "usage-limits-kein-verdict" "" "$V"
-V=$(eval_body 'Danke fuer den PR!'); check "fremdkommentar-kein-verdict" "" "$V"
+V=$(eval_body_0 'Codex usage limits reached. Try again later.'); check "usage-limits-kein-verdict" "" "$V"
+V=$(eval_body_0 'Danke fuer den PR!'); check "fremdkommentar-kein-verdict" "" "$V"
 
 # V10) 'Codex Review' MITTEN in einer Zeile ist kein Banner — die Anker `^`
 #      duerfen nicht verlorengehen, sonst faelscht ein Zitat ein Approval.
-V=$(eval_body 'siehe die Codex Review Summary von gestern'); check "banner-nur-am-zeilenanfang" "" "$V"
-V=$(eval_body 'ich zitiere: Codex Review: alles gut'); check "prefix-nur-am-zeilenanfang" "" "$V"
+V=$(eval_body_0 'siehe die Codex Review Summary von gestern'); check "banner-nur-am-zeilenanfang" "" "$V"
+V=$(eval_body_0 'ich zitiere: Codex Review: alles gut'); check "prefix-nur-am-zeilenanfang" "" "$V"
+
+# --- V10-V12: DAS P1-LOCH AUS RUNDE 3 ---------------------------------------
+# `**Completed**` heisst nur "Lauf beendet". Liegen offene Zeilenbefunde am
+# HEAD, ist das ein failure — egal wie gruen die Summary aussieht.
+SUM_OK="$(summary '✅ **Completed**' "$SHORT_SHA")"
+
+# V10) Ein offener Zeilenbefund schlaegt die abgeschlossene Summary
+V=$(eval_body "$SUM_OK" 1); check "completed+1-offener-befund→failure (P1 R3)" failure "$V"
+V=$(eval_body "$SUM_OK" 6); check "completed+6-offene-befunde→failure" failure "$V"
+
+# V11) Null offene Befunde — erst dann traegt die abgeschlossene Summary
+V=$(eval_body "$SUM_OK" 0); check "completed+0-offene-befunde→success" success "$V"
+
+# V12) UNBEKANNT (Abruf gescheitert) darf NIE als "null Befunde" gelten.
+#      Leerer Wert → pending, nicht success.
+V=$(eval_body "$SUM_OK" ""); check "completed+unbekannt→pending" "" "$V"
+V=$(eval_body "$SUM_OK");    check "completed+arg-fehlt→pending" "" "$V"
+
+# V13) Offene Befunde schlagen auch einen LAUFENDEN Lauf — failure vor pending
+V=$(eval_body "$(summary '🔄 **Running**' "$SHORT_SHA")" 2)
+check "running+offene-befunde→failure" failure "$V"
 
 echo "=== scope-Riegel: Ereignis-Unabhaengigkeit ==="
 

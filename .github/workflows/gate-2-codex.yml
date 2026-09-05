@@ -394,6 +394,36 @@ jobs:
           COMMENT_BODY=$(gh api --paginate "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" 2>/dev/null \
             | jq -sr '(add // []) | [.[] | select(.user.login == "chatgpt-codex-connector[bot]")] | sort_by(.created_at) | last | .body // empty' 2>/dev/null || echo "")
 
+          # --- Offene Codex-ZEILENbefunde am HEAD (v1.9.0, llc-ops-backlog#87) ------
+          # `Completed` in der Summary-Tabelle heisst nur "Lauf beendet", NICHT
+          # "keine Befunde" — Codex-Vorpruefung P1, Runde 3, belegt an
+          # llc-ops-backlog#1147: die Summary stand fuer `2293878` auf Completed,
+          # waehrend gleichzeitig ein P2-Zeilenbefund offen war. Befunde stehen
+          # NICHT im Kommentar-Body, sondern als Review-Kommentare unter
+          # /pulls/N/comments — die diese Bruecke bisher nie gelesen hat.
+          #
+          # Gezaehlt werden nur TOP-LEVEL-Kommentare des Connectors OHNE Antwort:
+          # ein beantworteter Befund gilt als abgearbeitet (`in_reply_to_id` zeigt
+          # auf den Elternkommentar). Ohne diese Einschraenkung bliebe ein einmal
+          # erledigter Befund ewig blockierend — die `commit_id` von
+          # Review-Kommentaren wandert beim Push auf den neuen HEAD mit.
+          #
+          # `--paginate` + `jq -s` mit `(add // [])` sind Pflicht (siehe oben, v1.6.2).
+          # Scheitert der Abruf, bleibt der Wert LEER = "unbekannt" und das Gate
+          # bleibt `pending`. Leer darf NIE als "null Befunde" gelesen werden.
+          CODEX_OFFEN=$(gh api --paginate "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" 2>/dev/null \
+            | jq -s --arg head "$HEAD_SHA" '
+                (add // []) as $all
+                | ($all | map(select(.in_reply_to_id != null) | .in_reply_to_id) | unique) as $beantwortet
+                | [ $all[]
+                    | select(.user.login == "chatgpt-codex-connector[bot]")
+                    | select(.commit_id == $head)
+                    | select(.in_reply_to_id == null)
+                    | select([.id] | inside($beantwortet) | not) ]
+                | length' 2>/dev/null || echo "")
+          case "$CODEX_OFFEN" in ''|*[!0-9]*) CODEX_OFFEN="" ;; esac
+          echo "Offene Codex-Zeilenbefunde am HEAD: ${CODEX_OFFEN:-unbekannt}"
+
           STATE=pending
           DESC="Awaiting Codex review for current HEAD"
 
@@ -415,12 +445,18 @@ jobs:
           # `**Completed**` traegt, ist ein Urteil. Alles andere bleibt `pending` —
           # die Irrtumsrichtung zeigt damit auf „zu vorsichtig", nie auf „zu gruen".
           # Beweis: scripts/gate-2-verdict-selftest.sh (Faelle V1-V9).
-          eval_body() {  # $1=body → echoes success|failure|"" (kein erkennbares Verdict)
+          eval_body() {  # $1=body  $2=offene Zeilenbefunde am HEAD (leer=unbekannt)
+                         #   → echoes success|failure|"" (kein erkennbares Verdict)
             if echo "$1" | grep -qE '### Integrations-Befunde|### Findings|🚨|\*\*P[01]\*\*'; then echo failure
             elif echo "$1" | grep -qF '<!-- codex-pull-request-review-summary -->'; then
+              # $2 = offene Codex-Zeilenbefunde am HEAD (Zahl; LEER = unbekannt).
+              # Reihenfolge: unbekannt schlaegt alles, dann Befunde, dann der
+              # abgeschlossene Lauf. "Completed" allein ist KEIN Freigabesignal.
+              if [ -z "${2:-}" ]; then echo ""
+              elif [ "$2" -gt 0 ]; then echo failure
               # Nur die Zeile(n) des aktuellen HEAD betrachten; ein abgeschlossener
               # Lauf eines ANDEREN Commits sagt ueber diesen HEAD nichts.
-              if echo "$1" | grep -F -e "$HEAD_SHA" -e "$SHORT_SHA" | grep -qF '**Completed**'; then echo success
+              elif echo "$1" | grep -F -e "$HEAD_SHA" -e "$SHORT_SHA" | grep -qF '**Completed**'; then echo success
               else echo ""; fi
             elif echo "$1" | grep -qE '^### 💡 Codex Review|^### Codex Review|^Codex Review: '; then echo success
             else echo ""; fi
@@ -433,15 +469,20 @@ jobs:
             elif [ "$REVIEW_STATE" = "CHANGES_REQUESTED" ]; then
               STATE=failure; DESC="Codex requests changes (HEAD)"
             else
-              V=$(eval_body "$REVIEW_BODY")
+              V=$(eval_body "$REVIEW_BODY" "$CODEX_OFFEN")
               [ "$V" = failure ] && { STATE=failure; DESC="Codex findings (HEAD)"; }
               [ "$V" = success ] && { STATE=success; DESC="Codex review (HEAD): no findings"; }
             fi
           elif [ -n "$COMMENT_BODY" ] && echo "$COMMENT_BODY" | grep -qF -e "$HEAD_SHA" -e "$SHORT_SHA"; then
             # (2) Kommentar-Fallback — nur wenn er den aktuellen HEAD-SHA explizit nennt.
-            V=$(eval_body "$COMMENT_BODY")
+            V=$(eval_body "$COMMENT_BODY" "$CODEX_OFFEN")
             [ "$V" = failure ] && { STATE=failure; DESC="Codex findings (comment@HEAD)"; }
             [ "$V" = success ] && { STATE=success; DESC="Codex comment (HEAD): no findings"; }
+            # Offene Zeilenbefunde sind hier der haeufigste Grund fuer failure —
+            # sie im Text benennen, sonst sucht man sie im Kommentar-Body.
+            if [ "$V" = failure ] && [ -n "$CODEX_OFFEN" ] && [ "$CODEX_OFFEN" -gt 0 ]; then
+              DESC="Codex findings (HEAD): $CODEX_OFFEN offene Zeilenkommentare"
+            fi
           fi
           # Andernfalls bleibt STATE=pending → Codex re-reviewt den neuen HEAD via Integration;
           # das folgende pull_request_review-Event lässt diese Bridge erneut laufen.
