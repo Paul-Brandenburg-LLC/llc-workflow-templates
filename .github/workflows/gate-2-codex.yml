@@ -49,10 +49,37 @@ concurrency:
 
 jobs:
   bridge:
+    # --- Jeder Statuswechsel braucht ein Ereignis (v1.9.0, llc-ops-backlog#87) --
+    # Vorpruefung P1, Runde 9: Das Tor zaehlt offene Codex-Befund-Threads und
+    # steht bei Befunden auf `failure`. Das AUFLOESEN eines Threads loest aber
+    # KEINEN Lauf aus — GitHub Actions kennt `pull_request_review_thread` nicht
+    # (nachgeschlagen 2026-09-05 an der Ereignis-Liste; es gibt den Trigger nur
+    # als Webhook). Ein Befund an unveraenderten Zeilen liesse das Tor deshalb
+    # nach dem Aufloesen dauerhaft rot stehen: der Deadlock von der anderen
+    # Seite, gegen den dieser ganze Fix da ist.
+    #
+    # Der Ausweg ist NICHT, die Zaehlung fallen zu lassen und auf die native
+    # Conversation-Protection zu setzen: die ist am 05.09.2026 in nur 3 von 32
+    # Consumer-Repos aktiv (`required_conversation_resolution`), das Tor traege
+    # die Last also faktisch allein.
+    #
+    # Deshalb der zweite Weg: ein ausdruecklicher Recheck-Eingang. Die Bruecke
+    # ist ein reiner NEUBERECHNER — sie liest den Zustand und schreibt einen
+    # Status. Wer den Lauf ausloest, aendert am Ergebnis nichts, also gibt es
+    # keinen Grund, den Ausloeser auf den Codex-Bot zu verengen; die Verengung
+    # war eine Sparmassnahme und hat die Neuberechnung nach dem Aufloesen
+    # verhindert. Jetzt genuegt EIN KOMMENTAR am PR (oder ein Review, oder ein
+    # Push) — alles Ereignisse, die die verteilten Caller ohnehin abonnieren
+    # (`pull_request`, `pull_request_review`, `issue_comment`). Der
+    # Failure-Status nennt diesen Weg im Text.
+    # Der PR-Waechter (`issue.pull_request != null`) bleibt: auf reinen Issues
+    # hat die Bruecke nichts zu suchen. `state == 'open'` haelt Kommentare an
+    # geschlossenen PRs draussen — dort ist nichts mehr zu entscheiden.
+    # Beweis: scripts/gate-2-verdict-selftest.sh (Faelle S3-S5).
     if: >-
       (github.event_name == 'pull_request') ||
-      (github.event_name == 'pull_request_review' && github.event.review.user.login == 'chatgpt-codex-connector[bot]') ||
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && github.event.comment.user.login == 'chatgpt-codex-connector[bot]')
+      (github.event_name == 'pull_request_review') ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && github.event.issue.state == 'open')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -65,6 +92,33 @@ jobs:
           set -euo pipefail
           SHA=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+          # --- Kurz-SHA nur, wenn er EINDEUTIG auf diesen HEAD zeigt -------
+          # (v1.9.0, Vorpruefung P1 Runde 13) Die HEAD-Bindung akzeptiert
+          # unten auch die Kurzform, weil Codex die Commit-Zelle der Summary
+          # siebenstellig schreibt (am 2026-09-05 an llc-ops-backlog#1147
+          # nachgemessen: `2293878`). Die Kurzform ersatzlos zu streichen
+          # waere deshalb ein NEUER Deadlock — davon hat dieser Fix schon
+          # zwei geheilt.
+          # Sieben Hex-Zeichen sind aber nur 28 Bit: ein PR-Autor kann einen
+          # neuen Commit mit demselben Praefix wie ein bereits abgeschlossener
+          # Review-Commit erzeugen und dessen Freigabe uebernehmen.
+          # Deshalb wird der Praefix hier GENAU EINMAL aufgeloest — eine Ebene
+          # ueber der Auswertung, weil `eval_body()` offline aus der YAML
+          # gezogen und ausgefuehrt wird und kein Netz sehen darf.
+          # Abruf und Auswertung getrennt, Exitcode als Bedingung: loest der
+          # Praefix nicht genau auf diesen HEAD auf (mehrdeutig, unbekannt,
+          # Abruf gescheitert), faellt die Bindung auf den VOLLEN SHA zurueck.
+          # ⛔ NICHT auf leer: ein leeres Muster in `grep -F -e ""` traefe
+          # JEDE Zeile und machte das Tor maximal gruen — genau die falsche
+          # Irrtumsrichtung.
+          # Beweis: scripts/gate-2-verdict-selftest.sh (B1-B5).
+          SHORT="$SHA"
+          KURZ="${SHA:0:7}"
+          if AUFGELOEST=$(gh api "/repos/$GITHUB_REPOSITORY/commits/$KURZ" --jq .sha 2>/dev/null); then
+            if [ "$AUFGELOEST" = "$SHA" ]; then SHORT="$KURZ"; fi
+          fi
+          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
           # --- Bot-PR-Konklusivitaets-Pflicht (PB LLC §3.4 v7.1.0; Klassen-Gate v1.8.0) ---
           # Governance-Gates enden auf Bot-PRs konklusiv mit success (bot-exempt) —
           # ein skipped/ewig-pending Required-Check haelt den Merge-Knopf fuer immer zu
@@ -248,7 +302,23 @@ jobs:
 
       - name: Scope Skip — Doc-only / Pin-Bump (PB LLC §3.4 v5.8 M2 + v7.0.5)
         id: scope
-        if: github.event_name == 'pull_request' && steps.head.outputs.bot_exempt != 'true'
+        # --- Ereignis-UNABHAENGIG (v1.9.0, llc-ops-backlog#87) --------------------
+        # Frueher stand hier zusaetzlich `github.event_name == 'pull_request'`. Das
+        # machte JEDEN Doc-only-PR der Org dauerhaft unmergebar: Codex schreibt
+        # kurz nach dem Oeffnen seinen Zusammenfassungs-Kommentar, die Bruecke
+        # laeuft darauf als `issue_comment` erneut — und dieser Step lief dann
+        # nicht. `outputs.skip` blieb LEER; leer ist nicht `'true'`, also
+        # passierten die beiden folgenden Steps ihren Waechter (`skip != 'true'`),
+        # die Bruecke fiel in den Codex-Urteilszweig und ueberschrieb ihr eigenes,
+        # korrektes `success` mit `pending`. Gruen wurde es nie wieder: der Code
+        # rechnet mit einem folgenden `pull_request_review`-Event, aber ein Review
+        # OHNE Befund gibt es bei Codex nicht (nur eine 👍-Reaktion). Deadlock.
+        # Doc-only ist eine Eigenschaft des DIFFS, nicht des Ausloesers — dieselbe
+        # Begruendung, aus der der Step "Resolve PR HEAD" oben schon
+        # ereignis-unabhaengig laeuft. Der Job-`if` deckt die Ereignisauswahl
+        # bereits ab (issue_comment nur an PRs und nur vom Codex-Bot).
+        # Beweis: scripts/gate-2-verdict-selftest.sh (Faelle S1/S2).
+        if: steps.head.outputs.bot_exempt != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
@@ -336,12 +406,17 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
           HEAD_SHA: ${{ steps.head.outputs.sha }}
+          SHORT_SHA: ${{ steps.head.outputs.short }}
         run: |
           set -euo pipefail
           # --- HEAD-Bindung (v7.0.0): ein Codex-Verdict zählt NUR, wenn es den aktuellen
           # HEAD betraf. Ohne diese Prüfung wird ein "APPROVED" von Commit A auf einen
           # neuen, ungeprüften Commit B übertragen (Stale-Approval-Loch, Audit-Befund). ---
-          SHORT_SHA="${HEAD_SHA:0:7}"
+          # SHORT_SHA kommt aus dem Step `Resolve PR HEAD` und ist DORT schon
+          # gegen den vollen SHA geprueft (P1 Runde 13). Hier wird er nur noch
+          # gegen LEER abgesichert: ein leeres `-e`-Muster traefe in `grep -F`
+          # jede Zeile. Vorgabe ist deshalb der volle SHA, nie die leere Zeichenkette.
+          [ -n "${SHORT_SHA:-}" ] || SHORT_SHA="$HEAD_SHA"
 
           # --- Vollstaendigkeits-Pflicht (v1.6.2, Befund geheimtreffen-site#107) --------
           # (1) BEIDE Abfragen MUESSEN `--paginate` tragen. Ohne das liefert die REST-API
@@ -378,34 +453,279 @@ jobs:
           COMMENT_BODY=$(gh api --paginate "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" 2>/dev/null \
             | jq -sr '(add // []) | [.[] | select(.user.login == "chatgpt-codex-connector[bot]")] | sort_by(.created_at) | last | .body // empty' 2>/dev/null || echo "")
 
+          # --- Offene Codex-BEFUND-THREADS (v1.9.0, llc-ops-backlog#87) -------------
+          # `Completed` in der Summary-Tabelle heisst nur "Lauf beendet", NICHT
+          # "keine Befunde" — Codex-Vorpruefung P1, Runde 3, belegt an
+          # llc-ops-backlog#1147: die Summary stand fuer `2293878` auf Completed,
+          # waehrend gleichzeitig ein P2-Zeilenbefund offen war. Befunde stehen
+          # NICHT im Kommentar-Body, sondern als Review-Kommentare am Diff — die
+          # diese Bruecke bisher nie gelesen hat.
+          #
+          # ⛔ Gezaehlt wird der ECHTE Thread-Zustand `isResolved`, NICHT das
+          # Vorhandensein einer ANTWORT (Vorpruefung P1, Runde 5). Die fruehere
+          # Fassung las `/pulls/N/comments` und strich jeden Befund, auf den
+          # irgendein `in_reply_to_id` zeigte. Eine Antwort belegt aber nur, dass
+          # jemand geschrieben hat — nicht, dass der Befund erledigt ist: ein
+          # widersprechender Kommentar des PR-Autors haette den Befund aus der
+          # Zaehlung entfernt und das Tor bei `Completed` auf `success` gesetzt.
+          # `isResolved` setzt dagegen nur, wer den Thread wirklich aufloest — es
+          # ist derselbe Zustand, den die Branch-Protection mit
+          # "All comments must be resolved" verlangt.
+          #
+          # ⛔ Gezaehlt werden nur AKTUELLE Threads (`isOutdated == false`)
+          # — Vorpruefung P1, Runde 6. Der Grund ist kein inhaltlicher, sondern
+          # ein Ereignis-Grund: Das Aufloesen eines Threads loest KEINEN
+          # Workflow aus. GitHub Actions kennt `pull_request_review_thread`
+          # nicht (nachgeschlagen 2026-09-05: unterstuetzt sind `pull_request`,
+          # `pull_request_review`, `pull_request_review_comment` und
+          # `pull_request_target`), und die verteilten Caller abonnieren nur
+          # `pull_request`, `pull_request_review` und `issue_comment`.
+          # Wuerde die blosse Auflosung den Status drehen, gaebe es dafuer nie
+          # einen Lauf: das Tor bliebe rot stehen — der Deadlock von der anderen
+          # Seite.
+          # Deshalb ist der Status eine Funktion des HEAD-Zustands, und jeder
+          # Uebergang haengt an einem Ereignis, das die Caller wirklich sehen:
+          # Ein Befund an Code, den der naechste Push aendert, wird `isOutdated`
+          # und zaehlt nicht mehr — und dieser Push feuert `synchronize`. Ein
+          # Befund an unveraendertem Code blockiert weiter, zu Recht.
+          # Das Aufloesen selbst kann kein Ereignis erzeugen (Actions kennt
+          # `pull_request_review_thread` nicht). Damit ein aufgeloester Befund
+          # das Tor trotzdem wieder freigibt, genuegt seit v1.9.0 ein beliebiger
+          # PR-Kommentar als Recheck — siehe Job-`if` oben (P1 Runde 9). Ohne
+          # diesen Eingang stuende das Tor bei einem Befund an unveraenderten
+          # Zeilen nach dem Aufloesen dauerhaft rot.
+          #
+          # Gemessen wird auf `!= true`, nicht auf `== false`: faellt ein Feld
+          # einmal weg, ist der Zustand UNBEKANNT — und unbekannt muss hier als
+          # "offen" gelten. Mit `== false` waere ein fehlendes Feld ein
+          # stillschweigendes "erledigt" und damit ein gruenes Tor.
+          #
+          # `--paginate` ist auch bei GraphQL Pflicht: die Verbindung liefert nur
+          # `first: 100` je Seite. Dafuer MUSS die Variable `$endCursor` heissen und
+          # `pageInfo { hasNextPage endCursor }` abgefragt werden — nur dann blaettert
+          # `gh` ueberhaupt weiter. Die Seiten kommen als EINZELNE Dokumente an und
+          # werden mit `jq -s` zusammengefuehrt (siehe v1.6.2 oben).
+          # Beweis: scripts/gate-2-threads-selftest.sh + Teil B2 des Paginate-Waechters.
+          #
+          # ⛔ ABRUF UND AUSWERTUNG MUESSEN GETRENNT SEIN (Vorpruefung P1, Runde 4).
+          # Als eine Pipe geschrieben — `gh api … | jq …` — ist der Fehlerfall
+          # STILL: scheitert `gh api`, bekommt `jq` leere Eingabe und `length`
+          # liefert `0`. `jq` endet mit 0, ein nachgestelltes `|| echo ""` feuert
+          # also NIE — und "0 offene Befunde" ist genau die Aussage, die ein
+          # abgeschlossenes Summary auf `success` setzt. Eine leere Antwort ist kein
+          # Beleg fuer Abwesenheit.
+          # Deshalb: erst abrufen und den Exitcode pruefen, dann auswerten.
+          # Scheitert eines von beidem, bleibt der Wert LEER = "unbekannt" und das
+          # Gate bleibt `pending`. Leer darf NIE als "null Befunde" gelesen werden.
+          CODEX_OFFEN=""
+          if THREADS_RAW=$(gh api graphql --paginate -F owner="${GITHUB_REPOSITORY%%/*}" -F repo="${GITHUB_REPOSITORY#*/}" -F pr="$PR_NUMBER" -f query='
+                query($owner: String!, $repo: String!, $pr: Int!, $endCursor: String) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $pr) {
+                      reviewThreads(first: 100, after: $endCursor) {
+                        pageInfo { hasNextPage endCursor }
+                        nodes {
+                          isResolved
+                          isOutdated
+                          comments(first: 1) { nodes { author { login } } }
+                        }
+                      }
+                    }
+                  }
+                }' 2>"$RUNNER_TEMP/codex-threads.err"); then
+            CODEX_OFFEN=$(printf '%s' "$THREADS_RAW" | jq -s '
+                [ .[] | .data.repository.pullRequest.reviewThreads.nodes[]? ]
+                | [ .[]
+                    | select(.isResolved != true)
+                    | select(.isOutdated != true)
+                    | select(((((.comments.nodes[0] // {}).author // {}).login // "")
+                              | sub("\\[bot\\]$"; "")) == "chatgpt-codex-connector") ]
+                | length' 2>/dev/null || echo "")
+          else
+            echo "::warning::Codex-Befund-Threads nicht abrufbar — Gate bleibt pending. $(head -c 200 "$RUNNER_TEMP/codex-threads.err" 2>/dev/null)"
+          fi
+          case "$CODEX_OFFEN" in ''|*[!0-9]*) CODEX_OFFEN="" ;; esac
+          [ -n "$CODEX_OFFEN" ] || echo "::warning::Codex-Befund-Threads unbekannt (Abruf oder Auswertung gescheitert) — Gate bleibt pending"
+          echo "Offene Codex-Befund-Threads: ${CODEX_OFFEN:-unbekannt}"
+
           STATE=pending
           DESC="Awaiting Codex review for current HEAD"
 
-          eval_body() {  # $1=body → echoes success|failure|"" (kein erkennbares Verdict)
-            if echo "$1" | grep -qE '### Integrations-Befunde|### Findings|🚨|\*\*P[01]\*\*'; then echo failure
+          # --- Summary-Kommentar: STATUS auswerten, nicht die Ueberschrift ----------
+          # (v1.9.0, llc-ops-backlog#87) Der Regelfall heute ist der editierte
+          # Sammel-Kommentar mit dem Marker `<!-- codex-pull-request-review-summary -->`
+          # und einer Tabelle je Review-Lauf:
+          #   | 📝 **Code Review** | ✅ **Completed** <time…> | `2528273` | PR opened |
+          # Die alte Erkennung verlangte genau drei Rauten (`^### Codex Review`) und
+          # traf `## Codex Review Summary` nie — `STATE` blieb auf `pending` und
+          # ueberschrieb das eigene `success`.
+          #
+          # ⛔ Die Ueberschrift zu weiten (`^#+`) waere die FALSCHE Reparatur und ist
+          # bewusst unterlassen: der Kommentar existiert schon, waehrend der Lauf noch
+          # LAEUFT — er wird nur editiert. Eine reine Ueberschriften-Erkennung haette
+          # das Tor bei „Running" auf `success` gesetzt und den Merge VOR den Befunden
+          # freigegeben (Stale-Green; Codex-Vorpruefung P1, Runde 2).
+          # Deshalb: nur eine Tabellenzeile, die den aktuellen HEAD nennt UND
+          # `**Completed**` traegt, ist ein Urteil. Alles andere bleibt `pending` —
+          # die Irrtumsrichtung zeigt damit auf „zu vorsichtig", nie auf „zu gruen".
+          # Beweis: scripts/gate-2-verdict-selftest.sh (Faelle V1-V9).
+          eval_body() {  # $1=body
+                         #   → echoes success|failure|"" (kein erkennbares Verdict)
+            # ⛔ Diese Funktion beurteilt AUSSCHLIESSLICH den Body.
+            #    Die Zahl offener Codex-Befund-Threads ist keine Eigenschaft des
+            #    Bodys. Sie hing hier einmal als zweites Argument — und wurde
+            #    dreimal umgangen (Vorpruefung Runden 3, 11, 12), weil jeder
+            #    neue Erfolgszweig sie erneut haette mitpruefen muessen. Der
+            #    Riegel steht deshalb jetzt genau EINMAL, oberhalb der ganzen
+            #    Kette. ⛔ Ihn hier wieder einzubauen waere ein Rueckschritt:
+            #    dann gaebe es zwei Wahrheiten, die auseinanderlaufen koennen.
+            #
+            local ZEILEN NICHT_EINORDBAR NEUESTE
+            # (a) Befund-Marker im Body schlagen alles.
+            if echo "$1" | grep -qE '### Integrations-Befunde|### Findings|🚨|\*\*P[01]\*\*'; then echo failure; return; fi
+            # (b) Sonst entscheidet die Form des Bodys.
+            if echo "$1" | grep -qF '<!-- codex-pull-request-review-summary -->'; then
+              # Drei Merkmale, alle auf DERSELBEN Tabellenzeile:
+              #   - der aktuelle HEAD (ein abgeschlossener Lauf eines ANDEREN
+              #     Commits sagt ueber diesen HEAD nichts),
+              #   - `**Code Review**` (Vorpruefung P1, Runde 11: die Summary
+              #     traegt je Review-ART eine eigene Zeile — ein abgeschlossenes
+              #     Security Review haette sonst das Tor geoeffnet, waehrend das
+              #     Code Review am selben Commit noch `Running` stand),
+              #   - `**Completed**`.
+              # Fehlt eines davon, bleibt es `pending` — die Irrtumsrichtung
+              # zeigt auf "zu vorsichtig", nie auf "zu gruen".
+              # (P1, Vorpruefung Runden 13 und 14) Die Summary traegt je
+              # Review-LAUF eine eigene Zeile. Zwei entgegengesetzte Loecher
+              # liegen hier dicht beieinander:
+              #
+              #  R13 (zu gruen): Ein `grep -q '**Completed**'` fand die Zeile
+              #  eines ALTEN, fertigen Laufs, waehrend fuer denselben HEAD
+              #  schon ein neuer Lauf auf `Running` stand — es konnte waehrend
+              #  eines laufenden Re-Reviews gemergt werden. "Es gibt eine
+              #  gruene Zeile" ist nie dasselbe wie "es gibt keine ungruene".
+              #
+              #  R14 (zu rot, ein NEUER Deadlock): Zu verlangen, dass ALLE
+              #  Zeilen `**Completed**` tragen, sperrt fuer immer, sobald ein
+              #  abgebrochener oder fehlgeschlagener Lauf stehenbleibt — ein
+              #  spaeter erfolgreicher Re-Review holt das Tor nie mehr aus
+              #  `pending`. Genau die Fehlerklasse, die dieser PR heilt.
+              #
+              # Beides zugleich loest die AKTUALITAET, nicht eine Liste von
+              # Statusworten (eine solche Liste waere in der einen Richtung
+              # umgehbar und in der anderen wieder ein Deadlock): Es
+              # entscheidet der NEUESTE Lauf am HEAD. Sein `Completed` ersetzt
+              # aeltere terminale Versuche (R14); ist er noch nicht fertig,
+              # bleibt es `pending` (R13).
+              # Zeitstempel sind belastbar: an 73 echten Summary-Zeilen aus
+              # 37 Repos (05.09.2026) traegt JEDE Code-Review-Zeile ein
+              # `<relative-time datetime=…>` in UTC — lexikalisch sortierbar.
+              # Beweis: scripts/gate-2-verdict-selftest.sh (V17-V23).
+              # ⛔ Der SHA-Treffer haengt an der COMMIT-ZELLE, nicht an der
+              # Zeile (P1 Vorpruefung Runde 15). `grep -F` suchte den
+              # siebenstelligen Praefix irgendwo in der Zeile: enthielt der
+              # VOLLE SHA eines alten, abgeschlossenen Laufs den Praefix nur
+              # INTERN, uebernahm ein passend erzeugter neuer HEAD dessen
+              # Freigabe — an der API-Aufloesung im Step `Resolve PR HEAD`
+              # vorbei, die genau das verhindern soll. Ebenso haette der
+              # Praefix in der Ausloeser- oder Zeitstempel-Spalte genuegt.
+              # Deshalb zellenweise: die Zeile an `|` teilen, jede Zelle von
+              # Leerraum und Backticks befreien, auf GLEICHHEIT pruefen.
+              # Beweis: scripts/gate-2-verdict-selftest.sh (V26-V28).
+              ZEILEN="$(printf '%s\n' "$1" | grep -F '**Code Review**' | awk -v h="$HEAD_SHA" -v k="$SHORT_SHA" '
+                { n = split($0, sp, "|")
+                  for (i = 1; i <= n; i++) {
+                    z = sp[i]; gsub(/[[:space:]`]/, "", z)
+                    if (z == h || z == k) { print; break } } }' || true)"
+              [ -n "$ZEILEN" ] || { echo ""; return; }
+              # (1) Eine Zeile OHNE Zeitstempel laesst sich nicht einordnen.
+              #     Traegt sie zudem kein `**Completed**`, ist sie nicht fertig
+              #     und koennte der neueste Lauf sein -> `pending`.
+              NICHT_EINORDBAR="$(printf '%s\n' "$ZEILEN" | grep -v 'datetime="' | grep -vF '**Completed**' || true)"
+              [ -z "$NICHT_EINORDBAR" ] || { echo ""; return; }
+              # (2) Die neueste Zeile MIT Zeitstempel.
+              NEUESTE="$(printf '%s\n' "$ZEILEN" | awk 'match($0, /datetime="[^"]*"/) { ts = substr($0, RSTART + 10, RLENGTH - 11); if (ts > neuste) { neuste = ts; zeile = $0 } } END { if (neuste != "") print zeile }')"
+              # (3) Traegt gar keine Zeile einen Zeitstempel, sind nach (1) alle
+              #     `**Completed**` — dann gibt es nichts, was blockieren koennte.
+              [ -n "$NEUESTE" ] || { echo success; return; }
+              case "$NEUESTE" in
+                *'**Completed**'*) echo success ;;
+                *) echo "" ;;
+              esac
             elif echo "$1" | grep -qE '^### 💡 Codex Review|^### Codex Review|^Codex Review: '; then echo success
             else echo ""; fi
           }
 
-          if [ -n "$REVIEW_SHA" ] && [ "$REVIEW_SHA" = "$HEAD_SHA" ]; then
-            # (1) Formales Review gegen den aktuellen HEAD — verbindlich.
-            if [ "$REVIEW_STATE" = "APPROVED" ]; then
-              STATE=success; DESC="Codex approved HEAD"
-            elif [ "$REVIEW_STATE" = "CHANGES_REQUESTED" ]; then
-              STATE=failure; DESC="Codex requests changes (HEAD)"
-            else
-              V=$(eval_body "$REVIEW_BODY")
-              [ "$V" = failure ] && { STATE=failure; DESC="Codex findings (HEAD)"; }
-              [ "$V" = success ] && { STATE=success; DESC="Codex review (HEAD): no findings"; }
+          # ⛔⛔ DER THREAD-RIEGEL STEHT VOR DER GESAMTEN URTEILSKETTE.
+          #
+          # Dreimal hat die Vorpruefung dieselbe Klasse an drei verschiedenen
+          # Stellen gefunden: Runde 3 im Summary-Zweig, Runde 11 im
+          # Legacy-Zweig, Runde 12 an `APPROVED` — das setzte `success` direkt
+          # und ging damit auch am Riegel INNERHALB von `eval_body()` vorbei.
+          # Ein Riegel, der IN einem Zweig sitzt, wird vom naechsten Zweig
+          # umgangen; er gehoert eine Ebene HOEHER als jeder erfolgliefernde
+          # Pfad. Beim dritten Mal wird er nicht noch einmal nachgebaut,
+          # sondern UEBERNOMMEN: er steht jetzt genau einmal, hier, bevor
+          # ueberhaupt ein Review oder ein Kommentar gelesen wird.
+          # ⛔ Ihn zusaetzlich wieder in `eval_body()` einzubauen waere ein
+          # Rueckschritt — dann gaebe es zwei Wahrheiten.
+          #
+          # Beweis: gate-2-chain-selftest.sh (K10-K13, Verhalten) und die
+          # Struktur-Probe S6 in gate-2-verdict-selftest.sh, die erzwingt, dass
+          # kein `STATE=success` je VOR diesem Riegel steht.
+          if [ -z "$CODEX_OFFEN" ]; then
+            # Unbekannt ist nicht null. Ist der Abruf oder die Auswertung
+            # gescheitert, bleibt es bei `pending` — gleich, wie gruen Review
+            # oder Kommentar aussehen.
+            DESC="Codex-Befund-Threads unbekannt — Gate bleibt pending"
+          elif [ "$CODEX_OFFEN" -gt 0 ]; then
+            # Der Text ist der einzige Ort, an dem der Weg heraus steht: das
+            # Aufloesen allein loest keinen Lauf aus (P1 Runde 9, s. Job-`if`).
+            STATE=failure
+            DESC="$CODEX_OFFEN offene Codex-Befunde — aufloesen, dann PR-Kommentar (rechnet neu)"
+          else
+            if [ -n "$REVIEW_SHA" ] && [ "$REVIEW_SHA" = "$HEAD_SHA" ]; then
+              # (1) Formales Review gegen den aktuellen HEAD — verbindlich.
+              if [ "$REVIEW_STATE" = "APPROVED" ]; then
+                STATE=success; DESC="Codex approved HEAD"
+              elif [ "$REVIEW_STATE" = "CHANGES_REQUESTED" ]; then
+                STATE=failure; DESC="Codex requests changes (HEAD)"
+              else
+                V=$(eval_body "$REVIEW_BODY")
+                [ "$V" = failure ] && { STATE=failure; DESC="Codex findings (HEAD)"; }
+                [ "$V" = success ] && { STATE=success; DESC="Codex review (HEAD): no findings"; }
+              fi
             fi
-          elif [ -n "$COMMENT_BODY" ] && echo "$COMMENT_BODY" | grep -qF -e "$HEAD_SHA" -e "$SHORT_SHA"; then
+
             # (2) Kommentar-Fallback — nur wenn er den aktuellen HEAD-SHA explizit nennt.
-            V=$(eval_body "$COMMENT_BODY")
-            [ "$V" = failure ] && { STATE=failure; DESC="Codex findings (comment@HEAD)"; }
-            [ "$V" = success ] && { STATE=success; DESC="Codex comment (HEAD): no findings"; }
+            #
+            # ⛔ Das haengt bewusst NICHT als `elif` am Review-Zweig (Vorpruefung P1,
+            # Runde 6). Codex hinterlaesst zu einem Review regelmaessig ein formales
+            # `COMMENTED` OHNE Body — die Befunde stehen in den Zeilen-Threads, das
+            # Urteil im Summary-Kommentar. Als `elif` war die Kette damit
+            # verschluckt: der Review-Zweig traf zu, `eval_body("")` lieferte kein
+            # Verdict, `STATE` blieb `pending`, und der Summary wurde nie gelesen.
+            # Das Tor haette nach dem Aufloesen der Befunde dauerhaft auf `pending`
+            # gestanden. Ein formales Review mit klarem Urteil (APPROVED /
+            # CHANGES_REQUESTED / Body mit Verdict) bleibt dagegen verbindlich —
+            # dann steht `STATE` nicht mehr auf `pending` und dieser Zweig laeuft
+            # gar nicht erst.
+            # ⛔ Auch dieser Vorab-Treffer muss eine EIGENSTAENDIGE Hex-Folge
+            # sein (P1 Vorpruefung Runde 15): steckt der Kurz-Praefix nur
+            # INNERHALB eines laengeren SHA, nennt der Kommentar diesen HEAD
+            # nicht. Fuer die Legacy-Bodyformen ist das die EINZIGE
+            # HEAD-Bindung — `eval_body()` prueft dort keinen SHA.
+            # Beweis: scripts/gate-2-chain-selftest.sh (K14/K15).
+            SHA_MUSTER='(^|[^0-9a-fA-F])('"$HEAD_SHA"'|'"$SHORT_SHA"')([^0-9a-fA-F]|$)'
+            if [ "$STATE" = pending ] && [ -n "$COMMENT_BODY" ] && printf '%s\n' "$COMMENT_BODY" | grep -qE "$SHA_MUSTER"; then
+              V=$(eval_body "$COMMENT_BODY")
+              [ "$V" = failure ] && { STATE=failure; DESC="Codex findings (comment@HEAD)"; }
+              [ "$V" = success ] && { STATE=success; DESC="Codex comment (HEAD): no findings"; }
+            fi
+            # Andernfalls bleibt STATE=pending → Codex re-reviewt den neuen HEAD via Integration;
+            # das folgende pull_request_review-Event lässt diese Bridge erneut laufen.
           fi
-          # Andernfalls bleibt STATE=pending → Codex re-reviewt den neuen HEAD via Integration;
-          # das folgende pull_request_review-Event lässt diese Bridge erneut laufen.
+
           echo "state=$STATE" >> "$GITHUB_OUTPUT"
           echo "desc=$DESC" >> "$GITHUB_OUTPUT"
 
