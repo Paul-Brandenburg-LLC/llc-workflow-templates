@@ -28,10 +28,12 @@ betroffen. Das Issue steht seit dem 29.04.2026 offen.
    „Resolve PR HEAD" laeuft aus demselben Grund schon ereignis-unabhaengig.
 2. **`eval_body()` liest die Status-Spalte der Summary-Tabelle**, nicht die
    Ueberschrift.
-3. **Der Step zaehlt die OFFENEN Codex-Zeilenbefunde am HEAD** aus
-   `/pulls/N/comments` und reicht sie als zweites Argument durch:
-   leer (unbekannt) → `pending` · `>0` → `failure` · `0` **und** `**Completed**`
-   in der HEAD-Zeile → `success`.
+3. **Der Step zaehlt die OFFENEN Codex-Befund-Threads** und reicht sie als
+   zweites Argument durch: leer (unbekannt) → `pending` · `>0` → `failure` ·
+   `0` **und** `**Completed**` in der HEAD-Zeile → `success`.
+   Gemessen wird der echte Thread-Zustand `isResolved` aus der GraphQL-
+   Verbindung `pullRequest.reviewThreads` — **nicht** das Vorhandensein einer
+   Antwort (siehe „Die dritte falsche Reparatur" unten).
 4. **Abruf und Auswertung sind getrennt**, mit Exitcode-Pruefung und zwei
    `::warning::`-Ausgaengen.
 
@@ -49,6 +51,24 @@ Fehler:
    „keine Befunde". Belegt an `llc-ops-backlog#1147`: die Summary stand fuer
    `2293878` auf Completed, waehrend sechs Zeilenbefunde dranhingen.
 
+## Die dritte falsche Reparatur (Vorpruefung P1, Runde 5)
+
+**Eine Antwort ist kein Beleg fuer Erledigung.** Die erste Fassung von Punkt 3
+las `/pulls/N/comments` und strich jeden Befund, auf den irgendein
+`in_reply_to_id` zeigte — „beantwortet" galt als „erledigt". Ein
+widersprechender Kommentar des PR-Autors („sehe ich anders") haette den
+weiterhin offenen Befund damit aus der Zaehlung entfernt; stand die Summary auf
+`**Completed**`, waere das Tor auf `success` gegangen. Wieder die gefaehrliche
+Irrtumsrichtung: zu gruen.
+
+Gemessen wird deshalb `isResolved` aus `pullRequest.reviewThreads` — derselbe
+Zustand, den die Branch-Protection mit „All comments must be resolved" verlangt.
+Ihn setzt nur, wer den Thread wirklich aufloest.
+
+Damit entfaellt auch der HEAD-Filter: ein offener Thread blockiert, gleich an
+welchem Commit er haengt. Das ist Absicht — die `commit_id` von
+Review-Kommentaren wandert beim Push ohnehin auf den neuen HEAD mit.
+
 Ebenfalls bewusst **nicht** verwendet: das 👍 des Connectors. Es ist zwar das
 echte „ohne Befund"-Signal (gemessen: `nachrichtenmaschine-app#356` hat es,
 `llc-ops-backlog#1147` nicht), aber auf Reaktionen feuert kein Ereignis — die
@@ -63,11 +83,17 @@ getauscht.
   Datei zurueckdreht.
 - **Gegen den alten Stand rot belegt: 18/29.**
   `git show <sha>:.github/workflows/gate-2-codex.yml > /tmp/alt.yml && GATE2_WORKFLOW=/tmp/alt.yml bash scripts/gate-2-verdict-selftest.sh`
-- `scripts/gate-2-paginate-selftest.sh` — Waechter um die getrennte Abrufform
-  **erweitert**, nicht geschwaecht. Gegenprobe gefahren: beide verbotenen
-  Schreibweisen (Pipe auf einer Zeile, Pipe ueber Backslash-Fortsetzung)
-  schlagen weiter an.
-- Alle zehn `scripts/*-selftest.sh` liefern `rc=0`.
+- `scripts/gate-2-threads-selftest.sh` — **NEU**, 15 Faelle, alle gruen. Zieht
+  den Zaehl-Ausdruck ebenfalls **im Ganzen** aus der Workflow-Datei. Enthaelt
+  die Verhaltensprobe des Runde-5-Befunds: derselbe widersprochene, offene
+  Befund zaehlt unter der alten Fassung **0**, unter der neuen **1**. Gegen den
+  alten Stand rot belegt.
+- `scripts/gate-2-paginate-selftest.sh` — Waechter zweimal **erweitert**, nie
+  geschwaecht: um die getrennte Abrufform (Teil B) und um GraphQL-Verbindungen
+  (Teil B2, `--paginate` + `$endCursor` + `pageInfo` + `jq -s`). Gegenproben
+  gefahren und im Test verankert: die beiden verbotenen Pipe-Schreibweisen und
+  drei bewusst falsche GraphQL-Fassungen schlagen weiter an.
+- Alle **elf** `scripts/*-selftest.sh` liefern `rc=0`.
 
 ## Reihenfolge beim Ausrollen — der Teil, den man nur einmal falsch macht
 
