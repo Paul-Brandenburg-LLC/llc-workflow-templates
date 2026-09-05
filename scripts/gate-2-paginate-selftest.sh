@@ -236,6 +236,178 @@ else
   fail "nur $GEPRUEFT Listen-Abfragen gefunden — das Suchmuster greift ins Leere, der Test kann nicht fallen"
 fi
 
+# ---------------------------------------------------------------------------
+# B2) Statischer Waechter: GraphQL-Verbindungen paginieren ebenfalls
+# ---------------------------------------------------------------------------
+# Teil B kennt nur REST-Pfade. Seit llc-ops-backlog#87 (P1 Runde 5) liest
+# gate-2-codex.yml die offenen Befund-Threads ueber GraphQL — dieselbe Zusage,
+# anderer Transport, und der Waechter sah ihn nicht.
+#
+# Bei GraphQL blaettert `gh api --paginate` NUR, wenn die Abfrage mitspielt:
+# die Cursor-Variable MUSS `$endCursor` heissen und `pageInfo { hasNextPage
+# endCursor }` muss abgefragt werden. Fehlt eines davon, liefert die Verbindung
+# still ihre erste Seite (`first: N`) und der Rest fehlt — bei einer Zaehlung
+# offener Befunde ist eine zu kleine Zahl genau die gefaehrliche Richtung.
+# Die Seiten kommen wie bei REST als EINZELNE Dokumente an und brauchen `jq -s`.
+#
+# Geprueft wird die KLASSE (jede Verbindung mit `first:`), nicht die bekannte
+# Fundstelle — und danach zwingend die Gegenprobe gegen bewusst falsche
+# Fassungen: eine erweiterte Wache, die nichts mehr faengt, ist eine
+# geschwaechte Wache.
+echo
+echo "B2) Vollstaendigkeit der GraphQL-Verbindungen"
+
+# Gibt je Verstoss eine Zeile aus; $1 = Verzeichnis mit *.yml.
+graphql_verstoesse() {
+  local dir="$1" f
+  for f in "$dir"/*.yml; do
+    [ -e "$f" ] || continue
+    # Aufruf vom `gh api … graphql` bis zum Ende des Query-Strings zu EINEM
+    # logischen Block zusammenziehen — der Query steht ueber viele Zeilen, ohne
+    # Backslash-Fortsetzungen, die Teil B zusammenzoege.
+    awk -v datei="$f" -v q="'" '
+      !inb && index($0, "gh api") && index($0, "graphql") {
+        inb = 1; start = NR; blk = $0
+        if (index($0, "}" q)) { print datei ":" start ":" blk; inb = 0 }
+        next
+      }
+      inb {
+        blk = blk " " $0
+        if (index($0, "}" q)) { print datei ":" start ":" blk; inb = 0 }
+      }
+      END { if (inb) print datei ":" start ":" blk }
+    ' "$f"
+  done | while IFS= read -r treffer; do
+    local datei nr rest blk
+    datei=${treffer%%:*}
+    rest=${treffer#*:}
+    nr=${rest%%:*}
+    blk=${rest#*:}
+
+    # Nur Verbindungen, die seitenweise ausliefern. Eine Punktabfrage
+    # (`repository { name }`) hat kein `first:` und braucht keine Paginierung.
+    printf '%s' "$blk" | grep -qE 'first[[:space:]]*:[[:space:]]*[0-9]+' || continue
+
+    printf '%s' "$blk" | grep -qF -- '--paginate' \
+      || echo "$datei:$nr — GraphQL-Verbindung mit first: OHNE --paginate (nur die erste Seite)"
+    printf '%s' "$blk" | grep -qF -- '$endCursor' \
+      || echo "$datei:$nr — GraphQL-Verbindung ohne \$endCursor-Variable (gh blaettert nur mit diesem Namen)"
+    printf '%s' "$blk" | grep -qE 'pageInfo[^}]*hasNextPage' && printf '%s' "$blk" | grep -qE 'pageInfo[^}]*endCursor' \
+      || echo "$datei:$nr — GraphQL-Verbindung ohne pageInfo { hasNextPage endCursor }"
+
+    # Zusammenfuehrung — wie in Teil B: entweder im Block selbst, oder bei der
+    # Auswertung der Variablen, in die der getrennte Abruf geschrieben hat.
+    if ! printf '%s' "$blk" | grep -qE -- 'jq [^|]*-[a-zA-Z]*s[a-zA-Z]*\b|--slurp'; then
+      local zuweisung
+      zuweisung=$(printf '%s' "$blk" | sed -nE 's/.*[^A-Za-z0-9_]([A-Za-z_][A-Za-z0-9_]*)=\$\(gh api[[:space:]].*/\1/p')
+      if [ -z "$zuweisung" ] \
+         || ! grep -E -- "\\\$\\{?${zuweisung}\\}?" "$datei" | grep -qE -- 'jq [^|]*-[a-zA-Z]*s[a-zA-Z]*\b|--slurp'; then
+        echo "$datei:$nr — GraphQL-Seiten werden nicht zusammengefuehrt (jq -s fehlt)"
+      fi
+    fi
+
+    # `--paginate` neben `--jq` laesst den Filter je Seite laufen — dieselbe
+    # Falle wie bei REST.
+    if printf '%s' "$blk" | grep -qF -- '--paginate' && printf '%s' "$blk" | grep -qE -- '--jq|--template'; then
+      echo "$datei:$nr — --paginate zusammen mit --jq/--template (Filter laeuft je SEITE)"
+    fi
+  done
+}
+
+ECHTE=$(graphql_verstoesse ".github/workflows")
+if [ -z "$ECHTE" ]; then
+  ok "alle GraphQL-Verbindungen in .github/workflows/ paginieren vollstaendig"
+else
+  while IFS= read -r z; do [ -n "$z" ] && fail "$z"; done <<< "$ECHTE"
+fi
+
+# Der Waechter muss ueberhaupt eine Verbindung gefunden haben — sonst meldet er
+# gruen, weil sein Suchmuster ins Leere greift.
+GRAPHQL_BLOECKE=$(for f in .github/workflows/*.yml; do
+  [ -e "$f" ] || continue
+  awk 'index($0, "gh api") && index($0, "graphql") { n++ } END { print n + 0 }' "$f"
+done | awk '{ s += $1 } END { print s + 0 }')
+[ "${GRAPHQL_BLOECKE:-0}" -ge 1 ] \
+  && ok "$GRAPHQL_BLOECKE GraphQL-Aufruf(e) ueberhaupt gefunden" \
+  || fail "kein GraphQL-Aufruf gefunden — der Waechter kann nicht fallen"
+
+# --- Gegenprobe: schlaegt die erweiterte Wache noch an? --------------------
+TMPD=$(mktemp -d 2>/dev/null) || TMPD=""
+if [ -n "$TMPD" ] && [ -d "$TMPD" ]; then
+  trap '[ -n "${TMPD:-}" ] && [ -d "${TMPD:-}" ] && rm -rf "$TMPD"' EXIT
+
+  # a) alles richtig, nur --paginate fehlt
+  cat > "$TMPD/boese-a.yml" <<'BOESE_A'
+jobs:
+  x:
+    steps:
+      - run: |
+          if RAW=$(gh api graphql -F owner="o" -F repo="r" -F pr="1" -f query='
+                query($owner: String!, $repo: String!, $pr: Int!, $endCursor: String) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $pr) {
+                      reviewThreads(first: 100, after: $endCursor) {
+                        pageInfo { hasNextPage endCursor }
+                        nodes { isResolved }
+                      }
+                    }
+                  }
+                }' 2>/dev/null); then
+            N=$(printf '%s' "$RAW" | jq -s 'length')
+          fi
+BOESE_A
+
+  # b) --paginate da, aber ohne $endCursor — gh blaettert dann nicht
+  cat > "$TMPD/boese-b.yml" <<'BOESE_B'
+jobs:
+  x:
+    steps:
+      - run: |
+          if RAW=$(gh api graphql --paginate -F owner="o" -F repo="r" -F pr="1" -f query='
+                query($owner: String!, $repo: String!, $pr: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $pr) {
+                      reviewThreads(first: 100) {
+                        nodes { isResolved }
+                      }
+                    }
+                  }
+                }' 2>/dev/null); then
+            N=$(printf '%s' "$RAW" | jq -s 'length')
+          fi
+BOESE_B
+
+  # c) vollstaendig paginiert, aber die Seiten werden nie zusammengefuehrt
+  cat > "$TMPD/boese-c.yml" <<'BOESE_C'
+jobs:
+  x:
+    steps:
+      - run: |
+          if RAW=$(gh api graphql --paginate -F owner="o" -F repo="r" -F pr="1" -f query='
+                query($owner: String!, $repo: String!, $pr: Int!, $endCursor: String) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $pr) {
+                      reviewThreads(first: 100, after: $endCursor) {
+                        pageInfo { hasNextPage endCursor }
+                        nodes { isResolved }
+                      }
+                    }
+                  }
+                }' 2>/dev/null); then
+            N=$(printf '%s' "$RAW" | jq '.data.repository.pullRequest.reviewThreads.nodes | length')
+          fi
+BOESE_C
+
+  for boese in a b c; do
+    TREFFER=$(graphql_verstoesse "$TMPD" | grep -c "boese-$boese\.yml")
+    [ "${TREFFER:-0}" -ge 1 ] \
+      && ok "Gegenprobe boese-$boese.yml: Wache schlaegt an ($TREFFER Meldung(en))" \
+      || fail "Gegenprobe boese-$boese.yml: Wache schweigt — sie wurde geschwaecht, nicht erweitert"
+  done
+else
+  fail "kein Wegwerf-Verzeichnis erhalten (mktemp) — die Gegenprobe konnte nicht laufen"
+fi
+
 echo
 [ "$FAIL" = 0 ] && { echo "gate-2-paginate-selftest: alle Proben bestanden"; exit 0; }
 echo "gate-2-paginate-selftest: FEHLGESCHLAGEN"; exit 1
