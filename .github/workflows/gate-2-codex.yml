@@ -630,13 +630,19 @@ jobs:
               # vorbei, die genau das verhindern soll. Ebenso haette der
               # Praefix in der Ausloeser- oder Zeitstempel-Spalte genuegt.
               # Deshalb zellenweise: die Zeile an `|` teilen, jede Zelle von
-              # Leerraum und Backticks befreien, auf GLEICHHEIT pruefen.
-              # Beweis: scripts/gate-2-verdict-selftest.sh (V26-V28).
+              # Leerraum und Backticks befreien. Gleichheit zu HEAD oder zur
+              # aufgeloesten Kurzform `k` (Step head: 7er nur wenn eindeutig,
+              # sonst voller SHA). Laengere Codex-Zellen (8–12 Hex) nur, wenn
+              # sie mit dieser eindeutigen Kurzform beginnen UND Praefix von
+              # HEAD sind. Ein 7er-Praefix darf die Eindeutigkeitspruefung
+              # nicht umgehen (P1 an #44). V26 bleibt rot. Beweis: V26-V30.
               ZEILEN="$(printf '%s\n' "$1" | grep -F '**Code Review**' | awk -v h="$HEAD_SHA" -v k="$SHORT_SHA" '
                 { n = split($0, sp, "|")
                   for (i = 1; i <= n; i++) {
                     z = sp[i]; gsub(/[[:space:]`]/, "", z)
-                    if (z == h || z == k) { print; break } } }' || true)"
+                    if (z == h || z == k) { print; break }
+                    if (length(k) < length(h) && length(z) >= length(k) && length(z) <= length(h) && substr(h, 1, length(z)) == z && substr(z, 1, length(k)) == k) { print; break }
+                  } }' || true)"
               [ -n "$ZEILEN" ] || { echo ""; return; }
               # (1) Eine Zeile OHNE Zeitstempel laesst sich nicht einordnen.
               #     Traegt sie zudem kein `**Completed**`, ist sie nicht fertig
@@ -710,14 +716,24 @@ jobs:
             # CHANGES_REQUESTED / Body mit Verdict) bleibt dagegen verbindlich —
             # dann steht `STATE` nicht mehr auf `pending` und dieser Zweig laeuft
             # gar nicht erst.
-            # ⛔ Auch dieser Vorab-Treffer muss eine EIGENSTAENDIGE Hex-Folge
-            # sein (P1 Vorpruefung Runde 15): steckt der Kurz-Praefix nur
-            # INNERHALB eines laengeren SHA, nennt der Kommentar diesen HEAD
-            # nicht. Fuer die Legacy-Bodyformen ist das die EINZIGE
-            # HEAD-Bindung — `eval_body()` prueft dort keinen SHA.
-            # Beweis: scripts/gate-2-chain-selftest.sh (K14/K15).
-            SHA_MUSTER='(^|[^0-9a-fA-F])('"$HEAD_SHA"'|'"$SHORT_SHA"')([^0-9a-fA-F]|$)'
-            if [ "$STATE" = pending ] && [ -n "$COMMENT_BODY" ] && printf '%s\n' "$COMMENT_BODY" | grep -qE "$SHA_MUSTER"; then
+            # ⛔ HEAD-Bindung an maximale Hex-Laeufe (7–40), die Praefix von
+            # HEAD sind UND mit der aufgeloesten Kurzform beginnen. Fiel
+            # SHORT_SHA auf den vollen SHA zurueck (7er nicht eindeutig),
+            # trifft ein 7er-Token nicht — sonst erbt ein Kollisions-Commit
+            # den alten Lauf (P1 an #44). Codex 10-Hex trifft, wenn der 7er
+            # eindeutig war (K16). Einbettung (K14) bleibt pending.
+            # Beweis: K14-K17.
+            head_im_kommentar=0
+            while IFS= read -r tok; do
+              case "$HEAD_SHA" in
+                "$tok"*)
+                  case "$tok" in
+                    "$SHORT_SHA"*) head_im_kommentar=1; break ;;
+                  esac
+                  ;;
+              esac
+            done < <(printf '%s\n' "$COMMENT_BODY" | grep -oE '[0-9a-fA-F]{7,40}' || true)
+            if [ "$STATE" = pending ] && [ -n "$COMMENT_BODY" ] && [ "$head_im_kommentar" = 1 ]; then
               V=$(eval_body "$COMMENT_BODY")
               [ "$V" = failure ] && { STATE=failure; DESC="Codex findings (comment@HEAD)"; }
               [ "$V" = success ] && { STATE=success; DESC="Codex comment (HEAD): no findings"; }
