@@ -8,6 +8,9 @@ on:
         required: false
 jobs:
   reviewer-a:
+    concurrency:
+      group: reviewer-a-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -90,6 +93,8 @@ jobs:
                     verdict = re.sub(r"(?i)\bapprove\b", "needs_changes", parts[1], count=1)
                     text = parts[0] + "### Verdikt" + verdict
                 text = text.rstrip() + "\n\n_Diff truncated at 80000 characters; incomplete review cannot approve._\n"
+            sha = os.environ.get("GITHUB_SHA", "")
+            text = f"_Reviewed HEAD `{sha}`._\n\n" + text
             pathlib.Path("urteil.md").write_text(text)
             print(text[:4000])
           except Exception as e:
