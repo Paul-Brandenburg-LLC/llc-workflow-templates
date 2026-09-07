@@ -1,0 +1,108 @@
+name: Reviewer A (Anhang B)
+# Slot reviewer_a: ein fremdes Auge am PR. Fail-open bei API-Ausfall.
+# Native Vendor-Apps dürfen als Adapter daneben laufen; dieses Schema ist die Schnittstelle.
+on:
+  workflow_call:
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: false
+jobs:
+  reviewer-a:
+    concurrency:
+      group: reviewer-a-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.2.2
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Diff holen
+        id: diff
+        run: |
+          git fetch origin "${{ github.event.pull_request.base.sha }}"
+          git diff "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" > "$RUNNER_TEMP/pr.diff"
+          wc -c "$RUNNER_TEMP/pr.diff"
+      - name: Urteilsschema Anhang B
+        id: urteil
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set +e
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::warning::reviewer_a fail-open: kein ANTHROPIC_API_KEY"
+            exit 0
+          fi
+          python3 - <<'PY'
+          import json, os, pathlib, re, urllib.request
+          raw = pathlib.Path(os.environ["RUNNER_TEMP"]).joinpath("pr.diff").read_text(errors="replace")
+          truncated = len(raw) > 80000
+          diff = raw[:80000]
+          instruction = (
+              "Review this git diff. Reply in EXACTLY this Markdown:\n\n"
+              "### Zusammenfassung\n1–3 Sätze.\n\n"
+              "### Integrations-Befunde\n- **Titel** — datei:zeile\n  Kurzbeschreibung.\n  Empfehlung: 1 Satz.\n\n"
+              "# oder genau:\n_Keine Modul-Inkonsistenzen gefunden._\n\n"
+              "### Notiert (nicht kritisch)\nOptional.\n\n"
+              "### Verdikt\napprove | needs_changes\n\n"
+              "Findings only on changed files. SHA of the diff is implicit. No praise.\n"
+          )
+          if truncated:
+              instruction += (
+                  "\nThe diff is TRUNCATED (first 80000 characters only). "
+                  "You MUST verdict needs_changes. Never approve an incomplete review.\n"
+              )
+          body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 1200,
+            "messages": [{"role": "user", "content": instruction + f"\nDIFF:\n{diff}"}]
+          }
+          req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=json.dumps(body).encode(),
+            headers={
+              "content-type": "application/json",
+              "x-api-key": os.environ["ANTHROPIC_API_KEY"],
+              "anthropic-version": "2023-06-01",
+            },
+            method="POST",
+          )
+          try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+              data = json.loads(r.read().decode())
+            if data.get("stop_reason") == "max_tokens":
+                print("::warning::reviewer_a fail-open: truncated model output")
+                raise SystemExit(0)
+            text = data["content"][0]["text"]
+            if not re.search(r"(?im)^### Verdikt\s*\n(?:approve|needs_changes)\s*$", text):
+                print("::warning::reviewer_a fail-open: incomplete schema")
+                raise SystemExit(0)
+            if truncated:
+                parts = re.split(r"(?im)^### Verdikt\s*$", text, maxsplit=1)
+                if len(parts) == 2:
+                    verdict = re.sub(r"(?i)\bapprove\b", "needs_changes", parts[1], count=1)
+                    text = parts[0] + "### Verdikt" + verdict
+                text = text.rstrip() + "\n\n_Diff truncated at 80000 characters; incomplete review cannot approve._\n"
+            sha = os.environ.get("PR_HEAD_SHA") or os.environ.get("GITHUB_SHA", "")
+            text = f"_Reviewed HEAD `{sha}`._\n\n" + text
+            pathlib.Path(os.environ["RUNNER_TEMP"]).joinpath("urteil.md").write_text(text)
+            print(text[:4000])
+          except Exception as e:
+            print(f"::warning::reviewer_a fail-open: {e}")
+            raise SystemExit(0)
+          PY
+          if [ -s "$RUNNER_TEMP/urteil.md" ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; fi
+          exit 0
+      - name: Urteil als PR-Kommentar
+        if: steps.urteil.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment "${{ github.event.pull_request.number }}" --body-file "$RUNNER_TEMP/urteil.md" || true
