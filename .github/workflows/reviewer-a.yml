@@ -27,11 +27,13 @@ jobs:
           git diff "origin/${{ github.base_ref }}...HEAD" > /tmp/pr.diff
           wc -c /tmp/pr.diff
       - name: Urteilsschema Anhang B
+        id: urteil
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           set +e
           rm -f urteil.md
+          echo "ok=false" >> "$GITHUB_OUTPUT"
           if [ -z "$ANTHROPIC_API_KEY" ]; then
             echo "::warning::reviewer_a fail-open: kein ANTHROPIC_API_KEY"
             exit 0
@@ -70,10 +72,12 @@ jobs:
             print(text[:4000])
           except Exception as e:
             print(f"::warning::reviewer_a fail-open: {e}")
+            raise SystemExit(0)
           PY
+          if [ -s urteil.md ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; fi
           exit 0
       - name: Urteil als PR-Kommentar
-        if: hashFiles('urteil.md') != ''
+        if: steps.urteil.outputs.ok == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
