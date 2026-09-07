@@ -23,7 +23,7 @@ jobs:
       - name: Diff holen
         id: diff
         run: |
-          git fetch origin "${{ github.base_ref }}" --depth=1
+          git fetch origin "${{ github.base_ref }}"
           git diff "origin/${{ github.base_ref }}...HEAD" > /tmp/pr.diff
           wc -c /tmp/pr.diff
       - name: Urteilsschema Anhang B
@@ -75,7 +75,15 @@ jobs:
           try:
             with urllib.request.urlopen(req, timeout=60) as r:
               data = json.loads(r.read().decode())
+            if data.get("stop_reason") == "max_tokens":
+                print("::warning::reviewer_a fail-open: truncated model output")
+                raise SystemExit(0)
             text = data["content"][0]["text"]
+            if not re.search(r"(?im)^### Verdikt\s*$", text) or not re.search(
+                r"(?im)^(approve|needs_changes)\s*$", text
+            ):
+                print("::warning::reviewer_a fail-open: incomplete schema")
+                raise SystemExit(0)
             if truncated:
                 parts = re.split(r"(?im)^### Verdikt\s*$", text, maxsplit=1)
                 if len(parts) == 2:
