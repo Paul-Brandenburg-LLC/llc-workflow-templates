@@ -630,13 +630,18 @@ jobs:
               # vorbei, die genau das verhindern soll. Ebenso haette der
               # Praefix in der Ausloeser- oder Zeitstempel-Spalte genuegt.
               # Deshalb zellenweise: die Zeile an `|` teilen, jede Zelle von
-              # Leerraum und Backticks befreien, auf GLEICHHEIT pruefen.
-              # Beweis: scripts/gate-2-verdict-selftest.sh (V26-V28).
+              # Leerraum und Backticks befreien. Gleichheit zu HEAD oder
+              # 7er-Kurzform, ODER die Zelle ist ein Praefix von HEAD (Laenge
+              # 7..40). Codex schreibt in der Commit-Zelle oft 8–12 Hex
+              # (`e4511fea50`) — das ist dieser HEAD, keine Einbettung in
+              # einen fremden SHA (V26 bleibt rot). Beweis: V26-V29.
               ZEILEN="$(printf '%s\n' "$1" | grep -F '**Code Review**' | awk -v h="$HEAD_SHA" -v k="$SHORT_SHA" '
                 { n = split($0, sp, "|")
                   for (i = 1; i <= n; i++) {
                     z = sp[i]; gsub(/[[:space:]`]/, "", z)
-                    if (z == h || z == k) { print; break } } }' || true)"
+                    if (z == h || z == k) { print; break }
+                    if (length(z) >= 7 && length(z) <= length(h) && substr(h, 1, length(z)) == z) { print; break }
+                  } }' || true)"
               [ -n "$ZEILEN" ] || { echo ""; return; }
               # (1) Eine Zeile OHNE Zeitstempel laesst sich nicht einordnen.
               #     Traegt sie zudem kein `**Completed**`, ist sie nicht fertig
@@ -710,14 +715,17 @@ jobs:
             # CHANGES_REQUESTED / Body mit Verdict) bleibt dagegen verbindlich —
             # dann steht `STATE` nicht mehr auf `pending` und dieser Zweig laeuft
             # gar nicht erst.
-            # ⛔ Auch dieser Vorab-Treffer muss eine EIGENSTAENDIGE Hex-Folge
-            # sein (P1 Vorpruefung Runde 15): steckt der Kurz-Praefix nur
-            # INNERHALB eines laengeren SHA, nennt der Kommentar diesen HEAD
-            # nicht. Fuer die Legacy-Bodyformen ist das die EINZIGE
-            # HEAD-Bindung — `eval_body()` prueft dort keinen SHA.
-            # Beweis: scripts/gate-2-chain-selftest.sh (K14/K15).
-            SHA_MUSTER='(^|[^0-9a-fA-F])('"$HEAD_SHA"'|'"$SHORT_SHA"')([^0-9a-fA-F]|$)'
-            if [ "$STATE" = pending ] && [ -n "$COMMENT_BODY" ] && printf '%s\n' "$COMMENT_BODY" | grep -qE "$SHA_MUSTER"; then
+            # ⛔ HEAD-Bindung an maximale Hex-Laeufe (7–40), und nur wenn HEAD
+            # mit diesem Lauf ANFAENGT (Praefix). Einbettung in einen fremden
+            # SHA (K14) trifft nicht; Codex' 10-Hex-Zelle (`e4511fea50`) trifft
+            # (K16). 7er-Kurzform und voller SHA bleiben. Beweis: K14-K16.
+            head_im_kommentar=0
+            while IFS= read -r tok; do
+              case "$HEAD_SHA" in
+                "$tok"*) head_im_kommentar=1; break ;;
+              esac
+            done < <(printf '%s\n' "$COMMENT_BODY" | grep -oE '[0-9a-fA-F]{7,40}' || true)
+            if [ "$STATE" = pending ] && [ -n "$COMMENT_BODY" ] && [ "$head_im_kommentar" = 1 ]; then
               V=$(eval_body "$COMMENT_BODY")
               [ "$V" = failure ] && { STATE=failure; DESC="Codex findings (comment@HEAD)"; }
               [ "$V" = success ] && { STATE=success; DESC="Codex comment (HEAD): no findings"; }

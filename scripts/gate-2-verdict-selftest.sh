@@ -303,6 +303,14 @@ FREMDZELLE=$(printf '%s\n\n## Codex Review Summary\n\n| Review | Status | Commit
 V=$(eval_body_0 "$FREMDZELLE")
 check "praefix-nur-in-der-ausloeser-spalte→pending" "" "$V"
 
+# V29) Codex schreibt in der Commit-Zelle 10 Hex (z.B. e4511fea50), nicht 7
+#      und nicht 40. Das ist ein Praefix von HEAD — derselbe Commit, nicht
+#      V26-Einbettung. devops-dashboard-app#145 / llc-paulbrandenburg-com-app#389
+#      2026-09-07: Gate blieb pending trotz Codex „no findings".
+ZEHN="${HEAD_SHA:0:10}"
+V=$(eval_body_0 "$(summary '✅ **Completed**' "$ZEHN")")
+check "zehn-hex-praefix-als-commit-zelle→success (Codex-Zelle)" success "$V"
+
 echo "=== Abruf-Fehler darf nicht als 'null Befunde' gelten ==="
 
 # A1) Die Demonstration der Falle (Vorpruefung P1, Runde 4): der jq-Filter

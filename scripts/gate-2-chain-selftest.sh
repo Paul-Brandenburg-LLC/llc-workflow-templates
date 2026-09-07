@@ -198,6 +198,15 @@ geprueft an ${SHORT_SHA}"
 pruefe "K15 Legacy-Banner + Kurz-SHA eigenstaendig → success (Gegenprobe)" \
   success "$(kette "" "" "" "$LEGACY_ECHT" 0)"
 
+# K16 — Codex schreibt **Reviewed commit:** `e4511fea50` (10 Hex). Das ist
+# Praefix von HEAD, keine Einbettung (K14). Ohne diesen Fall bleibt das Tor
+# pending, obwohl Codex den aktuellen HEAD ohne Findings abgenommen hat.
+LEGACY_ZEHN="Codex Review: Didn't find any major issues.
+
+**Reviewed commit:** \`${HEAD_SHA:0:10}\`"
+pruefe "K16 Legacy-Banner + 10-Hex-Praefix (Codex-Zelle) → success" \
+  success "$(kette "" "" "" "$LEGACY_ZEHN" 0)"
+
 # ---------------------------------------------------------------------------
 # 2) Gegenprobe: die Fixture von K1 trifft den Befund wirklich
 # ---------------------------------------------------------------------------
