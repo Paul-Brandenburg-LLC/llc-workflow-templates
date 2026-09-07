@@ -207,6 +207,14 @@ LEGACY_ZEHN="Codex Review: Didn't find any major issues.
 pruefe "K16 Legacy-Banner + 10-Hex-Praefix (Codex-Zelle) → success" \
   success "$(kette "" "" "" "$LEGACY_ZEHN" 0)"
 
+# K17 — P1 an #44: SHORT_SHA auf voll zurueckgefallen (7er nicht eindeutig).
+# Ein 7er-Token im Kommentar darf den alten Lauf nicht erben.
+SHORT_SAVE="$SHORT_SHA"
+SHORT_SHA="$HEAD_SHA"
+pruefe "K17 7er-Token bei auf voll gefallenem SHORT → pending" \
+  pending "$(kette "" "" "" "$LEGACY_ECHT" 0)"
+SHORT_SHA="$SHORT_SAVE"
+
 # ---------------------------------------------------------------------------
 # 2) Gegenprobe: die Fixture von K1 trifft den Befund wirklich
 # ---------------------------------------------------------------------------
