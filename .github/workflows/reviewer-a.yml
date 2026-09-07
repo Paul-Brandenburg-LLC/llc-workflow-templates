@@ -1,0 +1,77 @@
+name: Reviewer A (Anhang B)
+# Slot reviewer_a: ein fremdes Auge am PR. Fail-open bei API-Ausfall.
+# Native Vendor-Apps dürfen als Adapter daneben laufen; dieses Schema ist die Schnittstelle.
+on:
+  workflow_call:
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: false
+jobs:
+  reviewer-a:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Diff holen
+        id: diff
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          git diff "origin/${{ github.base_ref }}...HEAD" > /tmp/pr.diff
+          wc -c /tmp/pr.diff
+      - name: Urteilsschema Anhang B
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set +e
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::warning::reviewer_a fail-open: kein ANTHROPIC_API_KEY"
+            exit 0
+          fi
+          python3 - <<'PY'
+          import json, os, urllib.request, pathlib
+          diff = pathlib.Path("/tmp/pr.diff").read_text(errors="replace")[:80000]
+          body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 1200,
+            "messages": [{"role": "user", "content":
+              "Review this git diff. Reply in EXACTLY this Markdown:\n\n"
+              "### Zusammenfassung\n1–3 Sätze.\n\n"
+              "### Integrations-Befunde\n- **Titel** — datei:zeile\n  Kurzbeschreibung.\n  Empfehlung: 1 Satz.\n\n"
+              "# oder genau:\n_Keine Modul-Inkonsistenzen gefunden._\n\n"
+              "### Notiert (nicht kritisch)\nOptional.\n\n"
+              "### Verdikt\napprove | needs_changes\n\n"
+              "Findings only on changed files. SHA of the diff is implicit. No praise.\n\n"
+              f"DIFF:\n{diff}"}]
+          }
+          req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=json.dumps(body).encode(),
+            headers={
+              "content-type": "application/json",
+              "x-api-key": os.environ["ANTHROPIC_API_KEY"],
+              "anthropic-version": "2023-06-01",
+            },
+            method="POST",
+          )
+          try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+              data = json.loads(r.read().decode())
+            text = data["content"][0]["text"]
+            pathlib.Path("/tmp/urteil.md").write_text(text)
+            print(text[:4000])
+          except Exception as e:
+            print(f"::warning::reviewer_a fail-open: {e}")
+          PY
+          exit 0
+      - name: Urteil als PR-Kommentar
+        if: hashFiles('/tmp/urteil.md') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment "${{ github.event.pull_request.number }}" --body-file /tmp/urteil.md || true
