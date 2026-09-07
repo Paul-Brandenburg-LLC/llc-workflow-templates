@@ -39,20 +39,28 @@ jobs:
             exit 0
           fi
           python3 - <<'PY'
-          import json, os, urllib.request, pathlib
-          diff = pathlib.Path("/tmp/pr.diff").read_text(errors="replace")[:80000]
-          body = {
-            "model": "claude-sonnet-4-6",
-            "max_tokens": 1200,
-            "messages": [{"role": "user", "content":
+          import json, os, pathlib, re, urllib.request
+          raw = pathlib.Path("/tmp/pr.diff").read_text(errors="replace")
+          truncated = len(raw) > 80000
+          diff = raw[:80000]
+          instruction = (
               "Review this git diff. Reply in EXACTLY this Markdown:\n\n"
               "### Zusammenfassung\n1–3 Sätze.\n\n"
               "### Integrations-Befunde\n- **Titel** — datei:zeile\n  Kurzbeschreibung.\n  Empfehlung: 1 Satz.\n\n"
               "# oder genau:\n_Keine Modul-Inkonsistenzen gefunden._\n\n"
               "### Notiert (nicht kritisch)\nOptional.\n\n"
               "### Verdikt\napprove | needs_changes\n\n"
-              "Findings only on changed files. SHA of the diff is implicit. No praise.\n\n"
-              f"DIFF:\n{diff}"}]
+              "Findings only on changed files. SHA of the diff is implicit. No praise.\n"
+          )
+          if truncated:
+              instruction += (
+                  "\nThe diff is TRUNCATED (first 80000 characters only). "
+                  "You MUST verdict needs_changes. Never approve an incomplete review.\n"
+              )
+          body = {
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 1200,
+            "messages": [{"role": "user", "content": instruction + f"\nDIFF:\n{diff}"}]
           }
           req = urllib.request.Request(
             "https://api.anthropic.com/v1/messages",
@@ -68,6 +76,12 @@ jobs:
             with urllib.request.urlopen(req, timeout=60) as r:
               data = json.loads(r.read().decode())
             text = data["content"][0]["text"]
+            if truncated:
+                parts = re.split(r"(?im)^### Verdikt\s*$", text, maxsplit=1)
+                if len(parts) == 2:
+                    verdict = re.sub(r"(?i)\bapprove\b", "needs_changes", parts[1], count=1)
+                    text = parts[0] + "### Verdikt" + verdict
+                text = text.rstrip() + "\n\n_Diff truncated at 80000 characters; incomplete review cannot approve._\n"
             pathlib.Path("urteil.md").write_text(text)
             print(text[:4000])
           except Exception as e:
