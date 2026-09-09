@@ -20,8 +20,22 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq jq
+        # ⚠⚠⚠ KEIN `apt-get update` MEHR (llc-ops-backlog, 09.09.2026).
+        # `jq` ist auf den GitHub-Laeufer-Abbildern vorinstalliert; die Zeile
+        # holte trotzdem JEDE eingetragene Paketquelle neu — darunter die
+        # Chrome-Quelle von Google. Lieferte deren Spiegel einen
+        # inkonsistenten Index (`Hash Sum mismatch`), brach der Schritt mit
+        # Exit 100 ab, BEVOR eine einzige Pruefung lief. Weil dieser Baustein
+        # in jedem LLC-Repo als Pflichttor haengt, stand damit das ganze Haus:
+        # kein PR kam durch, obwohl an keinem etwas fehlte.
+        #
+        # Jetzt wird nur nachinstalliert, was wirklich fehlt — und das Update
+        # laeuft dann NUR fuer diesen einen Fall. Der Regelfall fasst apt gar
+        # nicht mehr an und ist damit von fremden Paketspiegeln unabhaengig.
+        if ! command -v jq >/dev/null 2>&1; then
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq
+        fi
         sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_amd64
         sudo chmod +x /usr/local/bin/yq
 
