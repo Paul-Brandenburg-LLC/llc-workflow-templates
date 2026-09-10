@@ -1,0 +1,47 @@
+name: Entwicklung Review
+# llc-verteilung: verwaltet — Quelle: llc-workflow-templates/distribution/entwicklung-review.yml
+# Diese Datei wird von propagate-templates.yml (Job `verteilung`) synchron
+# gehalten, zusammen mit .github/scripts/entwicklung_review_bridge.py. Braucht
+# ein Repo einen eigenen Zuschnitt: die Marker-Zeile oben ENTFERNEN — die Datei
+# wird dann als Abweichler ausgewiesen, aber nie ueberschrieben.
+#
+# Standard 8.1, Kapitel 5: der Status nennt den Pruefer-Hersteller und, bei
+# einem Sperrvermerk oder Ersatzwechsel der Box, den Ausfall. Faellt Codex aus,
+# weicht die Bruecke gate-2-codex auf den Box-Pruefer aus — nur bei gruenem
+# Box-Urteil fuer denselben Commit.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number
+        required: true
+        type: string
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+concurrency:
+  group: entwicklung-review-${{ github.event.number || inputs.pr }}
+  cancel-in-progress: true
+jobs:
+  # Heisst wie die Pflichtpruefung, die dieser Job veroeffentlicht
+  # (CONTEXT in .github/scripts/entwicklung_review_bridge.py). Solange die
+  # Namen auseinanderliefen, sah das Pre-PR-Quartett eine Pflichtpruefung ohne
+  # Erzeuger (2e-(i)) und sperrte jeden PR dieses Repos aus.
+  entwicklung-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # Only trusted base code executes. PR contents are review data, never code.
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+      - name: Review exact PR HEAD on Entwicklung and publish App-bound status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEVELOPMENT_DEPLOY_KEY: ${{ secrets.DEVELOPMENT_DEPLOY_KEY }}
+          DEVELOPMENT_KNOWN_HOSTS: ${{ secrets.DEVELOPMENT_KNOWN_HOSTS }}
+        run: python3 .github/scripts/entwicklung_review_bridge.py
