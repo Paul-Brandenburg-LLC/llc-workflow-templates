@@ -904,11 +904,29 @@ jobs:
           DESC: ${{ steps.urteil.outputs.desc }}
         run: |
           set -uo pipefail
+          # ⛔ FAIL CLOSED BEIM LESEN. Der Abruf unterscheidet jetzt "gelesen, kein
+          #    Stand" von "gar nicht gelesen". Vorher fiel ein fehlgeschlagener
+          #    oder leerer GET auf '[]' zurueck -- also auf "keine Urteile
+          #    vorhanden" -- und die Schleife schrieb `pending` ueber ein von der
+          #    Box geschriebenes `success`. Das ist GENAU der Selbst-Rueckfall,
+          #    den dieser Schritt verhindern soll: ein issue_comment-Lauf, der die
+          #    Staende nicht lesen kann, macht das Tor wieder auf.
           BESTAND='[]'
+          LESEN_OK=1
           if [ "$STATE" = "pending" ]; then
-            BESTAND="$(gh api "/repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/status" \
-              --jq '[.statuses[] | {context: .context, state: .state}]' 2>/dev/null || echo '[]')"
-            [ -n "$BESTAND" ] || BESTAND='[]'
+            LESEN_OK=0
+            if BESTAND="$(gh api "/repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/status" \
+                 --jq '[.statuses[] | {context: .context, state: .state}]' 2>/dev/null)"; then
+              # Auch eine gelungene Abfrage kann Unbrauchbares liefern; nur
+              # gueltiges JSON-Array zaehlt als gelesen.
+              if [ -n "$BESTAND" ] && printf '%s' "$BESTAND" | jq -e 'type == "array"' >/dev/null 2>&1; then
+                LESEN_OK=1
+              fi
+            fi
+            if [ "$LESEN_OK" != "1" ]; then
+              echo "::warning::Statusstaende an $HEAD_SHA nicht lesbar — es wird KEIN pending geschrieben (fail closed)"
+              exit 0
+            fi
           fi
           for ctx in gate-2-codex bridge; do
             if [ "$STATE" = "pending" ]; then

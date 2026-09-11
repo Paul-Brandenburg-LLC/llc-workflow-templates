@@ -1060,3 +1060,69 @@ def test_ein_ergebnis_beendet_die_frist_sofort(monkeypatch):
     assert b.collect("key", "hosts", "Paul-Brandenburg-LLC/llc-ops-backlog",
                      17, HEAD, "claude") == fertig
     assert uhr.jetzt == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Umlauf 3 — Befund des grok-Urteils auf 74a78561 (Ersatz fuer chatgpt)
+# "codex_ausweichen overwrites finished Codex verdicts when status_lesen fails"
+# ---------------------------------------------------------------------------
+
+def test_ein_unlesbarer_stand_schreibt_NICHTS(gh, monkeypatch):
+    """⛔ Der Befund: ein Lesefehler machte aus Befunden ein `success`.
+
+    `status_lesen` lief ueber `github_weich`, das bei JEDEM gh/jq-Fehler einen
+    leeren String liefert. Leer ist nicht in {success, failure, error} — also
+    wurde die Ausweichung auf beide Kontexte geschrieben. Ein voruebergehender
+    API-Fehler NACH einem echten Codex-Fehlschlag verwandelte damit Befunde in
+    ein `success`, sobald eine chatgpt-Sperre vorlag.
+
+    Unlesbar heisst jetzt UNBEKANNT, und unbekannt heisst: Finger stillhalten.
+    """
+    def wirft(*args):
+        raise b.StatusUnlesbar("api down")
+
+    monkeypatch.setattr(b, "status_lesen", wirft)
+    b.codex_ausweichen("r", "a" * 40, "approve", "grok", [SPERRE])
+    assert gh.status == [], "bei unlesbarem Stand wurde trotzdem geschrieben"
+
+
+def test_jeder_kontext_wird_einzeln_geprueft(gh, monkeypatch):
+    """⛔ Vorher entschied allein CODEX_CONTEXTS[0] ueber BEIDE Schreibvorgaenge.
+
+    Stand `bridge` schon auf einem echten Urteil und `gate-2-codex` nicht, wurde
+    `bridge` trotzdem ueberschrieben.
+    """
+    monkeypatch.setattr(b, "status_lesen",
+                        lambda repo, head, ctx: "failure" if ctx == "bridge" else "pending")
+    b.codex_ausweichen("r", "a" * 40, "approve", "grok", [SPERRE])
+    assert [z[0] for z in gh.status] == ["gate-2-codex"], \
+        "bridge trug ein echtes Urteil und haette nicht beschrieben werden duerfen"
+
+
+def test_ein_unlesbarer_kontext_haelt_den_anderen_nicht_auf(gh, monkeypatch):
+    """Gegenprobe: fail-closed gilt je Kontext, nicht fuer den ganzen Lauf.
+
+    Sonst wuerde ein einzelner Lesefehler die Ausweichung ganz verhindern — und
+    das Tor bliebe bei einem echten Ausfall grundlos zu.
+    """
+    def teils(repo, head, ctx):
+        if ctx == "bridge":
+            raise b.StatusUnlesbar("api down")
+        return "pending"
+
+    monkeypatch.setattr(b, "status_lesen", teils)
+    b.codex_ausweichen("r", "a" * 40, "approve", "grok", [SPERRE])
+    assert [z[0] for z in gh.status] == ["gate-2-codex"]
+
+
+def test_status_lesen_wirft_bei_einem_abrufehler(monkeypatch):
+    """Die Unterscheidung selbst: '' heisst kein Stand, StatusUnlesbar heisst Fehler."""
+    def kaputt(args):
+        raise RuntimeError("gh: not found")
+
+    monkeypatch.setattr(b, "github", kaputt)
+    try:
+        b.status_lesen("r", "a" * 40, "gate-2-codex")
+    except b.StatusUnlesbar:
+        return
+    raise AssertionError("status_lesen hat den Abrufehler verschluckt")

@@ -205,10 +205,30 @@ def status_zeit(antwort):
     return wert if isinstance(wert, str) and ZEITSTEMPEL.fullmatch(wert) else ""
 
 
+class StatusUnlesbar(Exception):
+    """Der Stand konnte NICHT gelesen werden -- nicht zu verwechseln mit "kein Stand".
+
+    ⛔ Genau diese Verwechslung war der Befund: `github_weich` liefert bei JEDEM
+    gh/jq-Fehler einen leeren String, und leer ist nicht in {success, failure,
+    error}. Ein voruebergehender API-Fehler nach einem ECHTEN Codex-Fehlschlag
+    liess die Ausweichung damit ueber das Urteil schreiben -- aus Befunden wurde
+    ein `success`. Das ist der Zustand, dessentwegen dieser PR ueberhaupt
+    existiert, nur an anderer Stelle.
+    """
+
+
 def status_lesen(repo, head, context):
-    """Aktueller Zustand eines Kontexts an genau diesem Commit ('' = unbekannt)."""
-    raw = github_weich(["api", f"repos/{repo}/commits/{head}/status",
-                        "--jq", '[.statuses[] | select(.context=="' + context + '")] | .[0].state // ""'])
+    """Aktueller Zustand eines Kontexts an genau diesem Commit.
+
+    '' heisst: gelesen, aber kein Stand gesetzt. Konnte gar nicht gelesen
+    werden, wirft es StatusUnlesbar -- der Aufrufer MUSS dann die Finger
+    stillhalten, statt zu raten.
+    """
+    try:
+        raw = github(["api", f"repos/{repo}/commits/{head}/status",
+                      "--jq", '[.statuses[] | select(.context=="' + context + '")] | .[0].state // ""'])
+    except (RuntimeError, OSError, subprocess.SubprocessError) as fehler:
+        raise StatusUnlesbar(str(fehler)[:200]) from fehler
     return raw.strip()
 
 
@@ -572,14 +592,28 @@ def codex_ausweichen(repo, head, value, pruefer, sperren):
     if urteil is None:
         return
     # Ein echtes Codex-Urteil an diesem Commit wird nie ueberschrieben.
-    vorhanden = status_lesen(repo, head, CODEX_CONTEXTS[0])
-    if vorhanden in {"success", "failure", "error"}:
-        print("::notice::gate-2-codex steht bereits auf " + vorhanden + " — keine Ausweichung")
-        return
+    # ⛔ JEDER Kontext wird EINZELN geprueft. Vorher entschied allein
+    #    CODEX_CONTEXTS[0] ueber BEIDE Schreibvorgaenge: stand `bridge` schon auf
+    #    einem Urteil und `gate-2-codex` nicht, wurde es trotzdem ueberschrieben.
+    # ⛔ UNLESBAR IST KEIN "nichts da". Kann der Stand nicht gelesen werden, wird
+    #    NICHT geschrieben -- fail closed. Ein voruebergehender API-Fehler darf
+    #    aus Befunden kein `success` machen.
     zustand, text = urteil
+    geschrieben = False
     for context in CODEX_CONTEXTS:
+        try:
+            vorhanden = status_lesen(repo, head, context)
+        except StatusUnlesbar as unlesbar:
+            print("::warning::" + context + " an " + head[:8]
+                  + " nicht lesbar — keine Ausweichung geschrieben (" + str(unlesbar)[:80] + ")")
+            continue
+        if vorhanden in {"success", "failure", "error"}:
+            print("::notice::" + context + " steht bereits auf " + vorhanden + " — keine Ausweichung")
+            continue
         status(repo, head, zustand, text, context=context)
-    print("::warning::" + text)
+        geschrieben = True
+    if geschrieben:
+        print("::warning::" + text)
 
 
 def kommentieren(repo, number, body):
