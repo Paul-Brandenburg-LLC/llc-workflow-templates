@@ -37,6 +37,21 @@ on:
         type: string
         default: ''
         required: false
+      codex_frist_minuten:
+        # Standard 8.1 Kapitel 5 „Tor-Ausweichung": Wie lange darf der Codex-Bot
+        # zu EINEM Commit schweigen, bevor das Tor auf den Box-Pruefer ausweicht?
+        # 45 min liegt weit ueber der gemessenen Antwortzeit des Bots und weit
+        # unter der Zeit, die ein PR im Haus wartet. 0 schaltet den Fristweg ab —
+        # der Ausfall-Weg ueber den Sperrvermerk bleibt davon unberuehrt.
+        description: 'Frist in Minuten ohne Codex-Antwort, ab der auf den Box-Prüfer ausgewichen wird (0 = aus)'
+        type: number
+        default: 45
+        required: false
+      box_tor_context:
+        description: 'Status-Context des Box-Tors, dessen Urteil die Ausweichung trägt'
+        type: string
+        default: 'entwicklung-review'
+        required: false
 
 permissions:
   pull-requests: read
@@ -745,14 +760,187 @@ jobs:
           echo "state=$STATE" >> "$GITHUB_OUTPUT"
           echo "desc=$DESC" >> "$GITHUB_OUTPUT"
 
+      # --- Tor-Ausweichung bei Herstellerausfall (Standard 8.1, Kapitel 5) -----
+      #
+      # Das Codex-Tor darf bei einem Codex-Ausfall nicht ewig `pending` stehen.
+      # Genau das steht seit dem 09.09.2026 im Haus: der Bot ist an der
+      # Nutzungsgrenze, antwortet nicht, und jeder PR haengt. Der bisherige
+      # Ausweg war ein Handgriff pro PR (`_codex-status-set.yml`), der
+      # `gate-2-codex` blind auf `success` setzte — ohne Hersteller, ohne
+      # Grund und ohne zu pruefen, ob ueberhaupt ein anderes Auge den Commit
+      # gesehen hat. Das ist der stille Bypass, den 8.1 verbietet.
+      #
+      # ⛔ Dieser Schritt laeuft NUR bei `pending`. Ein echtes Codex-Urteil
+      # (`success`/`failure`) und der Thread-Riegel (offene Befunde) stehen
+      # eine Ebene hoeher und werden nie ueberschrieben.
+      #
+      # Getragen wird die Ausweichung ausschliesslich vom Box-Tor
+      # (`entwicklung-review`) AN DEMSELBEN COMMIT. Dessen Bruecke schreibt
+      # HEAD-gebundene Marken in ihren Status-Text:
+      #     [llc-tor:<vendor>/<approve|needs_changes|unavailable>]
+      #     [llc-ausfall:<vendor>/<grund>]
+      # Einen Status setzen kann nur, wer Schreibrecht am Repo hat — der Autor
+      # eines Fork-PR also nicht. Die Marke ist damit so vertrauenswuerdig wie
+      # der Status selbst, anders als ein PR-Kommentar, den jeder schreibt.
+      # ⛔ Fremdtext, der ueber die Bruecke in den Status-Text wandert, ist
+      # damit NICHT gedeckt: der Grund eines Sperrvermerks kommt von der Box.
+      # Die Bruecke entschaerft ihn deshalb (`prosa()`/`slug()`), bevor er in
+      # die Prosa geht — sonst faelscht ein praeparierter Grund die Marke.
+      # Ohne gruenes `approve` des Box-Pruefers gibt es kein `success`.
+      # Beweis: scripts/codex-ausweichung-selftest.sh.
+      - name: Ausweichung bei Codex-Ausfall (Box-Prüfer trägt)
+        if: steps.head.outputs.bot_exempt != 'true' && steps.scope.outputs.skip != 'true'
+        id: urteil
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ steps.head.outputs.sha }}
+          CODEX_STATE: ${{ steps.codex.outputs.state }}
+          CODEX_DESC: ${{ steps.codex.outputs.desc }}
+          FRIST: ${{ inputs.codex_frist_minuten }}
+          BOX_CONTEXT: ${{ inputs.box_tor_context }}
+        run: |
+          set -uo pipefail
+
+          # Reine Entscheidung, kein Netz. Wird von
+          # scripts/codex-ausweichung-selftest.sh AUS DIESER DATEI gezogen und
+          # offline ausgefuehrt — es gibt keine zweite Kopie, die driften kann.
+          ausweich_urteil() {
+            local tor_state="$1" tor_desc="$2" alter="$3" frist="$4"
+            local pruefer verdikt grund gruen=0
+            pruefer="$(printf '%s' "$tor_desc" | sed -nE 's/.*\[llc-tor:([a-z]{3,10})\/(approve|needs_changes|unavailable)\].*/\1/p')"
+            verdikt="$(printf '%s' "$tor_desc" | sed -nE 's/.*\[llc-tor:([a-z]{3,10})\/(approve|needs_changes|unavailable)\].*/\2/p')"
+            grund="$(printf '%s' "$tor_desc" | sed -nE 's/.*\[llc-ausfall:chatgpt\/([a-z0-9-]{1,32})\].*/\1/p')"
+            # ⛔ Gruen heisst: der Status steht auf success UND die Marke sagt
+            # `approve`. Das Box-Tor setzt auch bei „Prüfer A ausgefallen"
+            # `success` (fail-open) — ohne die Marke wuerde ein Ausfall des
+            # Box-Pruefers als Freigabe fuer Codex durchgehen.
+            if [ "$tor_state" = "success" ] && [ "$verdikt" = "approve" ] && [ -n "$pruefer" ]; then
+              gruen=1
+            fi
+            if [ -n "$grund" ]; then
+              if [ "$gruen" = 1 ]; then
+                printf 'success|Codex ausgefallen (%s) — ausgewichen auf Box-Prüfer %s\n' "$grund" "$pruefer"
+              elif [ "$verdikt" = "needs_changes" ]; then
+                printf 'failure|Codex ausgefallen (%s) — Box-Prüfer %s meldet Findings\n' "$grund" "$pruefer"
+              else
+                printf 'failure|Codex ausgefallen (%s) — kein grünes Box-Urteil für diesen Commit\n' "$grund"
+              fi
+              return 0
+            fi
+            # Fristweg: kein Sperrvermerk, aber auch keine Codex-Antwort. Er
+            # traegt NUR bei gruenem Box-Urteil; sonst bleibt `pending`, denn
+            # ein schweigender Bot ist noch kein Befund.
+            case "$frist" in ''|*[!0-9]*) return 0 ;; esac
+            [ "$frist" -gt 0 ] || return 0
+            case "$alter" in ''|*[!0-9]*) return 0 ;; esac
+            if [ "$alter" -ge "$frist" ] && [ "$gruen" = 1 ]; then
+              printf 'success|Codex ohne Antwort seit %s min — ausgewichen auf Box-Prüfer %s\n' "$alter" "$pruefer"
+            fi
+            return 0
+          }
+
+          STATE="$CODEX_STATE"
+          DESC="$CODEX_DESC"
+          if [ "$STATE" = "pending" ]; then
+            TOR_JSON="$(gh api "/repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/status" \
+              --jq "[.statuses[] | select(.context==\"$BOX_CONTEXT\")] | .[0] // {}" 2>/dev/null || echo '{}')"
+            TOR_STATE="$(printf '%s' "$TOR_JSON" | jq -r '.state // ""')"
+            TOR_DESC="$(printf '%s' "$TOR_JSON" | jq -r '.description // ""')"
+            # Wie lange schweigt Codex? Gemessen ab dem Zeitpunkt, an dem das
+            # Box-Tor seinen Status FUER DIESEN COMMIT geschrieben hat.
+            #
+            # ⛔ NICHT die Git-Committer-Zeit (`.commit.committer.date`). Die
+            # steht im Commit-Objekt und ist vom PR-Autor frei setzbar
+            # (`GIT_COMMITTER_DATE`); ein zurueckdatierter Commit erfuellt die
+            # Frist schon beim ersten Lauf, und das Tor ginge allein auf das
+            # Box-Approve gruen — der Autor haette Codex selbst abgewaehlt.
+            # Ohne jede Absicht traf es den Normalfall mit: wer committet,
+            # weiterarbeitet und eine Stunde spaeter pusht, waehlte Codex ab.
+            # `created_at` schreibt dagegen die App, es haengt am HEAD und
+            # steht in TOR_JSON schon drin — kein zusaetzlicher Abruf.
+            # Nicht ermittelbar = leer = Fristweg aus; nie raten.
+            TOR_ZEIT="$(printf '%s' "$TOR_JSON" | jq -r '.created_at // ""')"
+            ALTER=""
+            if [ -n "$TOR_ZEIT" ]; then
+              if EPOCHE=$(date -u -d "$TOR_ZEIT" +%s 2>/dev/null); then
+                ALTER=$(( ( $(date -u +%s) - EPOCHE ) / 60 ))
+                [ "$ALTER" -ge 0 ] || ALTER=""
+              fi
+            fi
+            echo "Box-Tor ($BOX_CONTEXT): state=${TOR_STATE:-<keiner>} alter=${ALTER:-<unbekannt>} min frist=${FRIST} min"
+            AUSWEICH="$(ausweich_urteil "$TOR_STATE" "$TOR_DESC" "$ALTER" "$FRIST")"
+            if [ -n "$AUSWEICH" ]; then
+              STATE="${AUSWEICH%%|*}"
+              DESC="${AUSWEICH#*|}"
+              echo "::warning::$DESC"
+            fi
+          fi
+          echo "state=$STATE" >> "$GITHUB_OUTPUT"
+          echo "desc=$DESC" >> "$GITHUB_OUTPUT"
+
+      # ⛔ `pending` darf ein fertiges Urteil an diesem SHA NICHT ersetzen.
+      #
+      # Gemessener Kreis: die Bruecke weicht aus und setzt `gate-2-codex` auf
+      # `success`; ihr eigener PR-Kommentar loest `issue_comment` aus; dieser
+      # Workflow laeuft an, findet Codex weiterhin schweigend, rechnet
+      # `pending` — und schrieb das bedingungslos ueber das `success`. Die
+      # Ausweichung machte sich selbst kaputt. Die Bruecke setzt den Status
+      # seither VOR dem Kommentar; das hier ist die zweite Lage, unabhaengig
+      # davon, wer den Lauf ausloest.
+      #
+      # Ein echtes Codex-Urteil und ein Ausweich-Urteil DIESES Laufes sind nie
+      # `pending` und schreiben immer. Nur der Zustand „noch nichts entschieden"
+      # haelt sich zurueck.
+      #
+      # ⚠ Je Context geprueft, nicht einmal pauschal: der Schritt bedient zwei
+      # (`gate-2-codex` und `bridge`), und die koennen auseinanderstehen — etwa
+      # wenn ein frueherer Lauf nur einen von beiden geschrieben hat.
       - name: Post Status
         if: steps.head.outputs.bot_exempt != 'true' && steps.scope.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ steps.head.outputs.sha }}
+          STATE: ${{ steps.urteil.outputs.state }}
+          DESC: ${{ steps.urteil.outputs.desc }}
         run: |
+          set -uo pipefail
+          # ⛔ FAIL CLOSED BEIM LESEN. Der Abruf unterscheidet jetzt "gelesen, kein
+          #    Stand" von "gar nicht gelesen". Vorher fiel ein fehlgeschlagener
+          #    oder leerer GET auf '[]' zurueck -- also auf "keine Urteile
+          #    vorhanden" -- und die Schleife schrieb `pending` ueber ein von der
+          #    Box geschriebenes `success`. Das ist GENAU der Selbst-Rueckfall,
+          #    den dieser Schritt verhindern soll: ein issue_comment-Lauf, der die
+          #    Staende nicht lesen kann, macht das Tor wieder auf.
+          BESTAND='[]'
+          LESEN_OK=1
+          if [ "$STATE" = "pending" ]; then
+            LESEN_OK=0
+            if BESTAND="$(gh api "/repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/status" \
+                 --jq '[.statuses[] | {context: .context, state: .state}]' 2>/dev/null)"; then
+              # Auch eine gelungene Abfrage kann Unbrauchbares liefern; nur
+              # gueltiges JSON-Array zaehlt als gelesen.
+              if [ -n "$BESTAND" ] && printf '%s' "$BESTAND" | jq -e 'type == "array"' >/dev/null 2>&1; then
+                LESEN_OK=1
+              fi
+            fi
+            if [ "$LESEN_OK" != "1" ]; then
+              echo "::warning::Statusstaende an $HEAD_SHA nicht lesbar — es wird KEIN pending geschrieben (fail closed)"
+              exit 0
+            fi
+          fi
           for ctx in gate-2-codex bridge; do
-            gh api -X POST "/repos/$GITHUB_REPOSITORY/statuses/${{ steps.head.outputs.sha }}" \
-              -f state="${{ steps.codex.outputs.state }}" \
+            if [ "$STATE" = "pending" ]; then
+              VORHANDEN="$(printf '%s' "$BESTAND" \
+                | jq -r --arg c "$ctx" 'map(select(.context == $c)) | .[0].state // ""' 2>/dev/null || echo "")"
+              case "$VORHANDEN" in
+                success|failure|error)
+                  echo "::notice::$ctx steht an $HEAD_SHA schon auf $VORHANDEN — pending wertet nicht ab"
+                  continue
+                  ;;
+              esac
+            fi
+            gh api -X POST "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+              -f state="$STATE" \
               -f context="$ctx" \
-              -f description="${{ steps.codex.outputs.desc }}"
+              -f description="$DESC"
           done

@@ -35,6 +35,15 @@ name: Propagate Templates
 # scripts/pin-bump-decide.sh und scripts/pre-pr-quartett-selftest.sh festgenagelt.
 # dry_run-Input: nur erkennen + loggen, keine Branches/PRs.
 
+#
+# ── Zweiter Weg: ganze Dateien aus distribution/ (Standard 8.1, Kapitel 5/6) ──
+# Der Job `propagate-verteilung` verteilt das Box-Tor als PAAR aus Workflow und
+# Bruecken-Skript. Ein Reusable-Workflow-Pin reicht dafuer nicht: die Bruecke
+# wird als Datei aus dem Arbeitsbaum des Consumers gestartet
+# (`python3 .github/scripts/entwicklung_review_bridge.py`), und dorthin traegt
+# sie kein `uses:`. Semantik identisch zu standards/propagate-standard-bump.yml
+# (Job `verteilung`) — SSOT der Entscheidung: scripts/verteilung-decide.sh.
+
 on:
   push:
     branches: [main]
@@ -47,7 +56,7 @@ on:
         description: 'Templates-Tag (override; sonst latest semver tag)'
         required: false
       template:
-        description: 'Welche Template-Datei propagieren (gate-2-codex.yml | cold-start-ci.yml | auto-pin-bump.yml | pre-pr-quartett.yml)'
+        description: 'Welche Template-Datei propagieren (gate-2-codex.yml | cold-start-ci.yml | auto-pin-bump.yml | pre-pr-quartett.yml | entwicklung-review)'
         required: false
         default: 'gate-2-codex.yml'
       dry_run:
@@ -55,6 +64,15 @@ on:
         type: boolean
         required: false
         default: false
+      verteilung_ziele:
+        # ⛔ KEINE org-weite Verteilung des Box-Tors. Die Box nimmt nur die drei
+        # Repos an, die `entwicklung_review_control.py` (REPOS) und die Bruecke
+        # (ALIASES) kennen; ueberall sonst braeche der Workflow bei JEDEM PR mit
+        # „repository not registered" ab und liesse eine tote Pflichtpruefung
+        # stehen. Diese Liste darf erst wachsen, wenn die Box mitgewachsen ist.
+        description: 'Ziel-Repos für distribution/ (Leerzeichen-getrennt) — nur Repos, die die Box kennt'
+        required: false
+        default: 'llc-ops-backlog llc-paulbrandenburg-com-app standards'
 
 permissions:
   contents: read
@@ -131,6 +149,10 @@ jobs:
           [ -n "$EXCLUDED" ] && echo "::warning::Aktive Repos bewusst ausgenommen (§0.5 Abweichler-Ausweis):$EXCLUDED" || true
 
   propagate:
+    # Der Verteil-Weg (distribution/) und der Pin-Weg schliessen einander aus:
+    # 'entwicklung-review' ist kein Reusable-Pin, der Pin-Weg fande dort nichts
+    # und schriebe nur Rauschen ins Protokoll.
+    if: github.event.inputs.template != 'entwicklung-review'
     needs: [detect, discover]
     runs-on: ubuntu-latest
     strategy:
@@ -367,8 +389,178 @@ jobs:
             echo "::warning::PR creation failed in $REPO"
           fi
 
+  # --- Ganze Dateien aus distribution/ (Box-Tor als Paar) --------------------
+  verteilung-ziele:
+    if: github.event.inputs.template == 'entwicklung-review'
+    runs-on: ubuntu-latest
+    outputs:
+      repos: ${{ steps.liste.outputs.repos }}
+    steps:
+      - name: Zielliste lesen
+        id: liste
+        env:
+          ZIELE: ${{ github.event.inputs.verteilung_ziele }}
+        run: |
+          set -euo pipefail
+          [ -n "${ZIELE:-}" ] || ZIELE='llc-ops-backlog llc-paulbrandenburg-com-app standards'
+          REPOS=$(printf '%s' "$ZIELE" | tr -s '[:space:]' '\n' | sed '/^$/d' | jq -R . | jq -sc .)
+          COUNT=$(printf '%s' "$REPOS" | jq 'length')
+          # Leer heisst hier NICHT „nichts zu tun", sondern „Eingabe kaputt".
+          # Ein stiller Nulllauf haette in der Welle als „komplett" gegolten.
+          [ "$COUNT" -gt 0 ] || { echo "::error::Verteil-Zielliste leer — Lauf abgebrochen"; exit 1; }
+          echo "repos=$REPOS" >> "$GITHUB_OUTPUT"
+          echo "::notice::Verteil-Ziele für distribution/: $(printf '%s' "$REPOS" | jq -r 'join(", ")')"
+
+  propagate-verteilung:
+    needs: verteilung-ziele
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        repo: ${{ fromJSON(needs.verteilung-ziele.outputs.repos) }}
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.2.2
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: Paul-Brandenburg-LLC
+          repositories: ${{ matrix.repo }}
+
+      - name: Box-Tor als Paar verteilen (Workflow + Brücke)
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: Paul-Brandenburg-LLC/${{ matrix.repo }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/scripts/verteilung-decide.sh"
+
+          # ⛔ Beide Dateien gehen in EINEN Branch und EINEN PR. Ein Workflow
+          # ohne seine Bruecke laeuft bei jedem PR in „No such file" und laesst
+          # eine tote Pflichtpruefung stehen; eine Bruecke ohne Workflow tut
+          # nichts. Getrennte PRs waeren genau dieses Fenster.
+          PAARE="distribution/entwicklung-review.yml|.github/workflows/entwicklung-review.yml
+          distribution/entwicklung_review_bridge.py|.github/scripts/entwicklung_review_bridge.py"
+
+          DEFAULT_BRANCH=$(gh api "/repos/${REPO}" --jq '.default_branch' 2>/dev/null) || DEFAULT_BRANCH=""
+          [ -n "$DEFAULT_BRANCH" ] || { echo "::warning::$REPO: default_branch nicht ermittelbar — skip"; exit 0; }
+
+          BRANCH="chore/verteilung-entwicklung-review-${GITHUB_RUN_ID}"
+          # ⛔ ERST entscheiden, DANN schreiben — und entschieden wird ueber das
+          # PAAR, nicht ueber die einzelne Datei. Solange je Datei entschieden
+          # wurde, konnte eine Haelfte `abweichler` sein und die andere
+          # `create`/`update`: geschrieben wurde nur eine, der PR ging trotzdem
+          # auf, und das Zielrepo trug einen Workflow ohne Bruecke (oder
+          # umgekehrt) — genau das tote Pflichttor, das dieses Kapitel
+          # verhindern soll. In dieser Schleife wird deshalb NICHTS geschrieben.
+          MODI=""
+          PLAN=""
+          TMP=$(mktemp -d)
+          while IFS='|' read -r QUELLE ZIEL; do
+            QUELLE="$(printf '%s' "$QUELLE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            ZIEL="$(printf '%s' "$ZIEL" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            [ -n "$QUELLE" ] && [ -n "$ZIEL" ] || continue
+            FERN_JSON=$(gh api "/repos/${REPO}/contents/${ZIEL}" 2>/dev/null || echo '{}')
+            FERN_SHA=$(printf '%s' "$FERN_JSON" | jq -r '.sha // empty')
+            FERN_DATEI=""
+            if [ -n "$FERN_SHA" ]; then
+              FERN_DATEI="$TMP/$(basename "$ZIEL")"
+              printf '%s' "$FERN_JSON" | jq -r '.content // ""' | base64 -d > "$FERN_DATEI" 2>/dev/null || FERN_DATEI=""
+            fi
+            VERTEILUNG_MODE=""; VERTEILUNG_REASON=""
+            verteilung_decide "$GITHUB_WORKSPACE/$QUELLE" "$FERN_DATEI"
+            echo "::notice::$REPO $ZIEL: mode=$VERTEILUNG_MODE -- $VERTEILUNG_REASON"
+            if [ "$VERTEILUNG_MODE" = "abweichler" ]; then
+              # §0.5 Abweichler-Ausweis: sichtbar machen, nie ueberschreiben.
+              echo "::warning::$REPO $ZIEL weicht ab und traegt keinen Verteil-Marker — nicht angefasst ($VERTEILUNG_REASON)"
+            fi
+            MODI="$MODI $VERTEILUNG_MODE"
+            PLAN="$PLAN$QUELLE|$ZIEL|$VERTEILUNG_MODE"$'\n'
+          done <<< "$PAARE"
+
+          VERTEILUNG_PAAR_MODE=""; VERTEILUNG_PAAR_REASON=""
+          # shellcheck disable=SC2086  # MODI ist eine Wortliste, die Trennung ist gewollt.
+          verteilung_paar_modus $MODI
+          echo "::notice::$REPO Paar-Entscheidung: $VERTEILUNG_PAAR_MODE -- $VERTEILUNG_PAAR_REASON"
+          case "$VERTEILUNG_PAAR_MODE" in
+            abweichler)
+              echo "::warning::$REPO: das Box-Tor-Paar bleibt VOLLSTAENDIG unangetastet ($VERTEILUNG_PAAR_REASON) — ein halbes Paar waere ein totes Pflichttor"
+              exit 0
+              ;;
+            skip)
+              echo "::notice::$REPO: nichts zu verteilen"
+              exit 0
+              ;;
+          esac
+          # Ab hier geht das GANZE Paar in EINEN Branch und EINEN PR — auch die
+          # Haelfte, die fuer sich genommen `skip` waere. Byte-gleiche Dateien
+          # werden beim Schreiben uebersprungen, das spart den leeren Commit,
+          # aendert aber nichts an der Entscheidung: sie fiel fuer das Paar.
+          ZU_TUN="$PLAN"
+          if [ "${DRY_RUN:-false}" = "true" ]; then
+            echo "DRY-RUN: wuerde in $REPO verteilen:"; printf '%s' "$ZU_TUN"; exit 0
+          fi
+
+          BASIS=$(gh api "/repos/${REPO}/git/ref/heads/${DEFAULT_BRANCH}" --jq '.object.sha')
+          gh api -X POST "/repos/${REPO}/git/refs" \
+            -f "ref=refs/heads/${BRANCH}" -f "sha=${BASIS}" > /dev/null 2>&1 \
+            || echo "::notice::branch ${BRANCH} existiert bereits in $REPO"
+
+          while IFS='|' read -r QUELLE ZIEL MODUS; do
+            [ -n "$QUELLE" ] || continue
+            INHALT_B64=$(base64 < "$GITHUB_WORKSPACE/$QUELLE" | tr -d '\n')
+            # SHA IMMER vom Branch holen, nie vom Default-Branch: bei einem
+            # Re-Lauf liegt die Datei dort schon, und ein fremder sha waere 409.
+            ZWEIG_JSON=$(gh api "/repos/${REPO}/contents/${ZIEL}?ref=${BRANCH}" 2>/dev/null || echo '{}')
+            ZWEIG_SHA=$(printf '%s' "$ZWEIG_JSON" | jq -r '.sha // empty')
+            # Die `skip`-Haelfte steht im Paar-Plan, damit die Entscheidung
+            # ueber das Paar fiel — auf dem Branch liegt sie aber schon richtig.
+            # Ein PUT mit gleichem Inhalt waere ein leerer Commit, kein Fortschritt.
+            if [ "$MODUS" = "skip" ] && [ -n "$ZWEIG_SHA" ]; then
+              echo "::notice::$REPO $ZIEL steht schon richtig im Zweig — nichts zu schreiben"
+              continue
+            fi
+            NUTZLAST=$(jq -nc --arg msg "chore(tore): Box-Tor verteilen — ${ZIEL}" \
+              --arg ct "$INHALT_B64" --arg br "$BRANCH" --arg sh "$ZWEIG_SHA" \
+              'if $sh == "" then {message:$msg, content:$ct, branch:$br}
+               else {message:$msg, content:$ct, branch:$br, sha:$sh} end')
+            gh api -X PUT "/repos/${REPO}/contents/${ZIEL}" --input - <<<"$NUTZLAST" > /dev/null
+            echo "::notice::$REPO $ZIEL geschrieben"
+          done <<< "$ZU_TUN"
+
+          PR_URL=$(gh pr create --repo "$REPO" --base "$DEFAULT_BRANCH" --head "$BRANCH" \
+            --title "chore(tore): Box-Tor mit Hersteller-Ausweichung (Standard 8.1)" \
+            --body "PB LLC Entwicklungsstandard 8.1, Kapitel 5 — Verteilung aus llc-workflow-templates/distribution/.
+
+          Der Status \`entwicklung-review\` nennt jetzt den Prüfer-Hersteller und, bei einem Sperrvermerk oder Ersatzwechsel der Box, den Ausfall. Fällt Codex aus, weicht \`gate-2-codex\` auf den Box-Prüfer aus — nur bei grünem Box-Urteil für denselben Commit, und der Text nennt den Ausfall.
+
+          ## Blast-Radius
+
+          - [x] klein
+          - [ ] mittel
+          - [ ] groß
+
+          Zwei Dateien, kein Anwendungs-Code. Beide gehören zusammen und liegen deshalb in einem PR.
+
+          ## Test-Plan
+
+          - [x] T1 py_compile + YAML (scripts/entwicklung-review-bridge-selftest.sh in der Quelle)
+          - [ ] T2a CI muss gruen laufen
+
+          🤖 Auto-PR via propagate-templates.yml" || true)
+          if [ -n "$PR_URL" ]; then
+            echo "::notice::Verteil-PR in $REPO: $PR_URL"
+            gh pr merge "$PR_URL" --repo "$REPO" --auto --merge \
+              || echo "::warning::Auto-Merge nicht armierbar in $REPO ($PR_URL) — Approve/Merge durch Release-Session"
+          else
+            echo "::warning::PR-Anlage in $REPO fehlgeschlagen"
+          fi
+
   summary:
-    needs: propagate
+    needs: [propagate, propagate-verteilung]
     runs-on: ubuntu-latest
     if: always()
     permissions:

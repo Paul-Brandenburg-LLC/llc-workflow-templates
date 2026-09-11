@@ -34,7 +34,10 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.2.2
       - name: YAML-Syntax-Check workflows
         run: |
-          for f in .github/workflows/*.yml .github/actions/*/action.yml; do
+          # distribution/ gehoert dazu: das sind die Dateien, die
+          # propagate-templates.yml als GANZES in fremde Repos schreibt. Eine
+          # kaputte YAML dort faellt sonst erst im Consumer auf — nach dem PR.
+          for f in .github/workflows/*.yml .github/actions/*/action.yml distribution/*.yml; do
             [ -f "$f" ] || continue
             python3 -c "import yaml,sys; yaml.safe_load(open('$f'))" || { echo "::error::Invalid YAML in $f"; exit 1; }
             echo "ok: $f"
