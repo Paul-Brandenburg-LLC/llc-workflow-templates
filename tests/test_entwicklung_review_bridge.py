@@ -7,6 +7,7 @@ propagate-templates.yml in die Consumer-Repos verteilt.
 import importlib.util
 import json
 from pathlib import Path
+import re
 import sys
 
 import pytest
@@ -276,8 +277,7 @@ def gh(monkeypatch):
 
 def test_codex_ausweichen_setzt_beide_kontexte(gh, monkeypatch):
     monkeypatch.setattr(b, "status_lesen", lambda *a: "pending")
-    monkeypatch.setattr(b, "codex_meldung_am_pr", lambda *a: False)
-    b.codex_ausweichen("r", "a" * 40, 7, "approve", "grok", [SPERRE])
+    b.codex_ausweichen("r", "a" * 40, "approve", "grok", [SPERRE])
     assert [z[0] for z in gh.status] == ["gate-2-codex", "bridge"]
     assert all(z[1] == "success" for z in gh.status)
     assert all("Codex ausgefallen (usage-limit)" in z[2] for z in gh.status)
@@ -286,37 +286,137 @@ def test_codex_ausweichen_setzt_beide_kontexte(gh, monkeypatch):
 def test_codex_ausweichen_ueberschreibt_ein_echtes_codex_urteil_nie(gh, monkeypatch):
     """⛔ Ein Codex-`failure` ist ein Befund, kein Ausfall."""
     monkeypatch.setattr(b, "status_lesen", lambda *a: "failure")
-    monkeypatch.setattr(b, "codex_meldung_am_pr", lambda *a: False)
-    b.codex_ausweichen("r", "a" * 40, 7, "approve", "grok", [SPERRE])
+    b.codex_ausweichen("r", "a" * 40, "approve", "grok", [SPERRE])
     assert gh.status == []
 
 
 def test_codex_ausweichen_ohne_sperre_ruehrt_das_tor_nicht_an(gh, monkeypatch):
     monkeypatch.setattr(b, "status_lesen", lambda *a: "pending")
-    monkeypatch.setattr(b, "codex_meldung_am_pr", lambda *a: False)
-    b.codex_ausweichen("r", "a" * 40, 7, "approve", "grok", [])
+    b.codex_ausweichen("r", "a" * 40, "approve", "grok", [])
     assert gh.status == []
 
 
-def test_codex_ausweichen_erkennt_die_nutzungsgrenze_aus_der_bot_meldung(gh, monkeypatch):
+def test_codex_ausweichen_sucht_nicht_mehr_selbst(gh, monkeypatch):
+    """⛔ Befund 1(a): die Erkennung gehoert in den Trichter, nicht hierher.
+
+    Suchte `codex_ausweichen()` selbst, faerbte es das Codex-Tor, waehrend der
+    Status-Text des Box-Tors den Ausfall verschwiege — und genau an dieser
+    Marke haengt der Sofort-Weg in gate-2-codex.yml. Ein Ausfall, der nicht in
+    `sperren` steht, existiert fuer diesen Schritt nicht.
+    """
     monkeypatch.setattr(b, "status_lesen", lambda *a: "pending")
-    monkeypatch.setattr(b, "codex_meldung_am_pr", lambda *a: True)
-    b.codex_ausweichen("r", "a" * 40, 7, "approve", "grok", [])
-    assert [z[1] for z in gh.status] == ["success", "success"]
-    assert "nutzungsgrenze" in gh.status[0][2]
+    gerufen = []
+    monkeypatch.setattr(b, "codex_meldung_am_pr",
+                        lambda *a: gerufen.append(a) or True)
+    b.codex_ausweichen("r", "a" * 40, "approve", "grok", [])
+    assert gh.status == []
+    assert gerufen == []
 
 
-def test_codex_meldung_am_pr_trennt_autor_und_text(monkeypatch):
-    zeilen = ("jemand\tusage limit reached\n"
-              "chatgpt-codex-connector[bot]\tI reviewed the diff and found nothing.")
-    monkeypatch.setattr(b, "github_weich", lambda args: zeilen)
-    assert b.codex_meldung_am_pr("r", 7) is False
+# --------------------------------------------------------------------------
+# Befund 3: die Ausfall-Erkennung ist HEAD-gebunden, autor-exakt, wortlaut-eng
+# --------------------------------------------------------------------------
+
+SEIT = "2026-09-11T00:00:00Z"
+DANACH = "2026-09-11T00:05:00Z"
+DAVOR = "2026-09-09T12:00:00Z"
 
 
-def test_codex_meldung_am_pr_findet_den_wortlaut_beim_richtigen_autor(monkeypatch):
-    zeilen = "chatgpt-codex-connector[bot]\tCodex usage limits reached. Try again later."
-    monkeypatch.setattr(b, "github_weich", lambda args: zeilen)
-    assert b.codex_meldung_am_pr("r", 7) is True
+def meldung(wann, autor, text):
+    return wann + "\t" + autor + "\t" + text
+
+
+def test_codex_ausfall_findet_die_echte_nutzungsgrenze():
+    zeilen = meldung(DANACH, "chatgpt-codex-connector[bot]",
+                     "Codex usage limits reached. Try again later.")
+    assert b.codex_ausfall_in_meldungen(zeilen, SEIT) is True
+
+
+@pytest.mark.parametrize("autor", [
+    "codexplorer",                       # ⛔ fiel unter den alten Praefix
+    "codex-fan",
+    "openai-watcher",
+    "chatgpt-codex-connector",           # ohne [bot] — nicht der App-Login
+    "jemand",
+])
+def test_codex_ausfall_nimmt_nur_den_exakten_login(autor):
+    """⛔ `(?i)^(chatgpt-codex-connector|codex|openai)` war ein Praefix-Treffer."""
+    zeilen = meldung(DANACH, autor, "Codex usage limits reached.")
+    assert b.codex_ausfall_in_meldungen(zeilen, SEIT) is False
+
+
+@pytest.mark.parametrize("text", [
+    # ⛔ Der Kern von Befund 3: normale Pruefprosa. Ein echtes Codex-Review
+    # haette sich mit dem alten Wortlaut selbst zum Ausgefallenen erklaert.
+    "P2: the client has no rate limit handling; add a rate limit backoff.",
+    "Consider documenting the API rate limit in the README.",
+    "The usage cap of the free tier should be mentioned.",
+    "I reviewed the diff and found nothing.",
+])
+def test_codex_ausfall_haelt_normale_pruefprosa_fuer_keinen_ausfall(text):
+    zeilen = meldung(DANACH, "chatgpt-codex-connector[bot]", text)
+    assert b.codex_ausfall_in_meldungen(zeilen, SEIT) is False
+
+
+def test_codex_ausfall_ignoriert_eine_meldung_von_vor_diesem_head():
+    """⛔ Eine Nutzungsgrenze von vorgestern ist kein laufender Ausfall."""
+    zeilen = meldung(DAVOR, "chatgpt-codex-connector[bot]",
+                     "Codex usage limits reached.")
+    assert b.codex_ausfall_in_meldungen(zeilen, SEIT) is False
+
+
+@pytest.mark.parametrize("seit", ["", None, "gestern", "2026-09-11", "2026-09-11T00:00:00+02:00"])
+def test_codex_ausfall_ohne_brauchbare_zeit_ist_aus(seit):
+    """Nicht ermittelbar heisst nicht raten — die Erkennung schweigt."""
+    zeilen = meldung(DANACH, "chatgpt-codex-connector[bot]",
+                     "Codex usage limits reached.")
+    assert b.codex_ausfall_in_meldungen(zeilen, seit) is False
+
+
+def test_codex_ausfall_ignoriert_eine_zeile_ohne_brauchbare_zeit():
+    zeilen = meldung("irgendwann", "chatgpt-codex-connector[bot]",
+                     "Codex usage limits reached.")
+    assert b.codex_ausfall_in_meldungen(zeilen, SEIT) is False
+
+
+def test_codex_ausfall_trennt_zeit_autor_und_text():
+    """Der Wortlaut eines fremden Autors faellt nicht dem Bot zu."""
+    zeilen = "\n".join([
+        meldung(DANACH, "jemand", "Codex usage limits reached."),
+        meldung(DANACH, "chatgpt-codex-connector[bot]",
+                "I reviewed the diff and found nothing."),
+    ])
+    assert b.codex_ausfall_in_meldungen(zeilen, SEIT) is False
+
+
+def test_status_zeit_liest_created_at_aus_der_post_antwort():
+    assert b.status_zeit(json.dumps({"created_at": SEIT, "state": "pending"})) == SEIT
+
+
+@pytest.mark.parametrize("antwort", [
+    "", None, "kein json", "[]", json.dumps({}),
+    json.dumps({"created_at": "2026-09-11"}),
+    json.dumps({"created_at": 17.0}),
+])
+def test_status_zeit_raet_nie(antwort):
+    assert b.status_zeit(antwort) == ""
+
+
+def test_sperre_aus_codex_meldung_gehoert_in_den_trichter(monkeypatch):
+    monkeypatch.setattr(b, "github_weich", lambda args: meldung(
+        DANACH, "chatgpt-codex-connector[bot]", "Codex usage limits reached."))
+    roh = b.sperre_aus_codex_meldung("r", 7, SEIT)
+    assert roh == [{"vendor": "chatgpt", "reason": "nutzungsgrenze", "until": None}]
+    # Und durch den Trichter kommt sie als Marke heraus.
+    text = b.tor_text("approve", "grok", b.sperren_zusammenfuehren(roh))
+    assert "[llc-ausfall:chatgpt/nutzungsgrenze]" in text
+    assert "[llc-tor:grok/approve]" in text
+
+
+def test_sperre_aus_codex_meldung_erfindet_nichts(monkeypatch):
+    monkeypatch.setattr(b, "github_weich", lambda args: meldung(
+        DAVOR, "chatgpt-codex-connector[bot]", "Codex usage limits reached."))
+    assert b.sperre_aus_codex_meldung("r", 7, SEIT) == []
 
 
 def test_sperren_von_der_box_ist_tolerant_wenn_health_fehlt(monkeypatch, capsys):
@@ -423,8 +523,15 @@ def quittung(verdict, vendor="grok", reason=None):
 class Lauf:
     """`main()` ohne GitHub, ohne SSH, ohne Box."""
 
-    def __init__(self, monkeypatch, tmp_path, body, antworten, echtes_remote=False):
+    def __init__(self, monkeypatch, tmp_path, body, antworten, echtes_remote=False,
+                 meldungen="", pending_zeit="2026-09-11T00:00:00Z"):
         self.status, self.kommentare, self.antworten = [], [], antworten
+        # ⛔ Befund 1(b): erst der Status, dann der Kommentar. Nur eine
+        # gemeinsame Liste kann die REIHENFOLGE belegen; zwei getrennte
+        # Listen haetten den Fehler nie gezeigt.
+        self.ablauf = []
+        self.meldungen = meldungen
+        self.pending_zeit = pending_zeit
         ereignis = tmp_path / "event.json"
         ereignis.write_text(json.dumps({"number": 7}))
         monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
@@ -434,22 +541,30 @@ class Lauf:
         self.metadaten = json.dumps({"headRefOid": HEAD, "state": "OPEN",
                                      "body": body, "files": [{"path": "a.py"}]})
         monkeypatch.setattr(b, "github", self._github)
-        monkeypatch.setattr(b, "github_weich", lambda args: "")
+        # Genau der Abruf, den `codex_meldung_am_pr()` macht: die PR-Kommentare
+        # in der Zeilenform `<created_at>\t<login>\t<Text>`.
+        monkeypatch.setattr(b, "github_weich", lambda args: self.meldungen)
         monkeypatch.setattr(b, "status", self._status)
         if not echtes_remote:
             monkeypatch.setattr(b, "remote", self._remote)
         monkeypatch.setattr(b, "status_lesen", lambda *a: "pending")
-        monkeypatch.setattr(b, "codex_meldung_am_pr", lambda *a: False)
 
     def _github(self, args):
         if "view" in args:
             return self.metadaten
         if "comment" in args:
             self.kommentare.append(args)
+            self.ablauf.append(("kommentar", str(len(self.kommentare))))
         return ""
 
     def _status(self, repo, head, value, description, context=b.CONTEXT):
+        """Antwortet wie GitHub: das angelegte Status-Objekt mit `created_at`."""
         self.status.append((context, value, description))
+        self.ablauf.append(("status", context + "=" + str(value)))
+        if not self.pending_zeit:
+            return ""
+        return json.dumps({"context": context, "state": value,
+                           "created_at": self.pending_zeit})
 
     def _remote(self, key, hosts, args, timeout=120):
         antwort = self.antworten.get(args[0])
@@ -568,3 +683,380 @@ def test_main_der_ausweich_pfad_hat_weiter_einen_weg_zu_gruen(monkeypatch, tmp_p
     assert [z[0] for z in codex] == list(b.CODEX_CONTEXTS)
     assert all(z[1] == "success" for z in codex)
     assert all("ausgewichen auf Box-Prüfer grok" in z[2] for z in codex)
+
+
+# --------------------------------------------------------------------------
+# Befund 1: der HAUPTFALL — Box sagt approve, Codex schweigt an der Grenze
+#
+# ⛔ Genau dafuer ist Kapitel 5 gebaut, und genau da feuerte die Ausweichung
+# nicht. `health` steht nicht in der Allowlist des Zwangskommandos, und
+# `sperre_aus_ergebnis()` schweigt bei `approve` — `sperren` war leer, als
+# `tor_text()` lief. Der Box-Status trug `[llc-tor:grok/approve]`, aber keine
+# `[llc-ausfall:chatgpt/…]`-Marke; der Sofort-Weg des Codex-Tors haengt an
+# genau dieser Marke. Uebrig blieb der 45-Minuten-Fristweg.
+# --------------------------------------------------------------------------
+
+CODEX_MELDUNG = ("2026-09-11T00:05:00Z\tchatgpt-codex-connector[bot]\t"
+                 "Codex usage limits reached. Try again later.")
+
+
+def test_main_hauptfall_codex_meldung_faerbt_schon_den_box_status(monkeypatch, tmp_path):
+    lauf = Lauf(monkeypatch, tmp_path, MIT_FELD,
+                {"review-start": START, "review-result": quittung("approve")},
+                meldungen=CODEX_MELDUNG)
+    assert lauf.starten() == 0
+    _, zustand, text = lauf.tor()
+    assert zustand == "success"
+    # Das Codex-Tor liest den Status-TEXT. Ohne diese Marke gibt es keinen
+    # Sofort-Weg, nur die Frist.
+    assert "[llc-ausfall:chatgpt/nutzungsgrenze]" in text
+    assert "[llc-tor:grok/approve]" in text
+    assert "Ausfall chatgpt (nutzungsgrenze) — Prüfer jetzt grok" in text
+    # Und die Bruecke weicht selbst aus, unter beiden Kontexten.
+    codex = [z for z in lauf.status if z[0] in b.CODEX_CONTEXTS]
+    assert [z[0] for z in codex] == list(b.CODEX_CONTEXTS)
+    assert all(z[1] == "success" for z in codex)
+    assert all("ausgewichen auf Box-Prüfer grok" in z[2] for z in codex)
+
+
+def test_main_ohne_lesbare_pending_zeit_wird_nicht_geraten(monkeypatch, tmp_path):
+    """Kein `created_at` -> Erkennung aus. Lieber kein Tor als ein falsches."""
+    lauf = Lauf(monkeypatch, tmp_path, MIT_FELD,
+                {"review-start": START, "review-result": quittung("approve")},
+                meldungen=CODEX_MELDUNG, pending_zeit="")
+    assert lauf.starten() == 0
+    _, _, text = lauf.tor()
+    assert "[llc-ausfall:" not in text
+    assert not any(z[0] in b.CODEX_CONTEXTS for z in lauf.status)
+
+
+def test_main_alte_codex_meldung_faerbt_nichts(monkeypatch, tmp_path):
+    """Eine Nutzungsgrenze von vorgestern traegt kein Pflichttor."""
+    alt = ("2026-09-09T12:00:00Z\tchatgpt-codex-connector[bot]\t"
+           "Codex usage limits reached.")
+    lauf = Lauf(monkeypatch, tmp_path, MIT_FELD,
+                {"review-start": START, "review-result": quittung("approve")},
+                meldungen=alt)
+    assert lauf.starten() == 0
+    _, _, text = lauf.tor()
+    assert "[llc-ausfall:" not in text
+    assert not any(z[0] in b.CODEX_CONTEXTS for z in lauf.status)
+
+
+def test_main_codex_meldung_auch_im_stoerungsfall_im_trichter(monkeypatch, tmp_path):
+    """Eine halbe Regel waere keine: der Ausfall wird auch genannt, wenn der
+    eigene Lauf gescheitert ist — gruen macht ihn das nicht."""
+    lauf = Lauf(monkeypatch, tmp_path, "Ein handgeschriebener PR-Text.",
+                {"review-start": START, "review-result": quittung("approve")},
+                meldungen=CODEX_MELDUNG)
+    assert lauf.starten() == 1
+    _, zustand, text = lauf.tor()
+    assert zustand == "error"
+    assert "[llc-ausfall:chatgpt/nutzungsgrenze]" in text
+    assert "[llc-tor:" not in text
+    assert not any(z[0] in b.CODEX_CONTEXTS for z in lauf.status)
+
+
+# --------------------------------------------------------------------------
+# Befund 1(b): erst der Status, dann der Kommentar — in JEDEM Ausgang
+#
+# ⛔ `gh pr comment` loest `issue_comment` aus, und daran haengt
+# gate-2-codex.yml. Stand der Kommentar vorn, rechnete dieser Lauf Codex
+# erneut als `pending` und schrieb das ueber das `success`, das die Bruecke
+# Sekunden spaeter setzte: die Bruecke machte ihre eigene Ausweichung mit
+# ihrem eigenen Kommentar kaputt.
+# --------------------------------------------------------------------------
+
+def _erster_kommentar(lauf):
+    namen = [e[0] for e in lauf.ablauf]
+    assert "kommentar" in namen, "kein PR-Kommentar geschrieben"
+    return namen.index("kommentar")
+
+
+def test_main_status_steht_vor_dem_kommentar_im_regelfall(monkeypatch, tmp_path):
+    lauf = Lauf(monkeypatch, tmp_path, MIT_FELD,
+                {"review-start": START, "review-result": quittung("approve")})
+    assert lauf.starten() == 0
+    stelle = _erster_kommentar(lauf)
+    assert lauf.ablauf[:stelle] == [("status", "entwicklung-review=pending"),
+                                    ("status", "entwicklung-review=success")]
+    assert lauf.ablauf[stelle:] == [("kommentar", "1")]
+
+
+def test_main_auch_die_ausweichung_steht_vor_dem_kommentar(monkeypatch, tmp_path):
+    """⛔ Der Kern: das fertige Codex-Tor MUSS stehen, bevor der Kommentar
+    einen Workflow-Lauf ausloest, der es sonst auf `pending` zuruecksetzt."""
+    lauf = Lauf(monkeypatch, tmp_path, MIT_FELD,
+                {"review-start": START, "review-result": quittung("approve")},
+                meldungen=CODEX_MELDUNG)
+    assert lauf.starten() == 0
+    stelle = _erster_kommentar(lauf)
+    vorher = [e[1] for e in lauf.ablauf[:stelle]]
+    assert vorher == ["entwicklung-review=pending", "entwicklung-review=success",
+                      "gate-2-codex=success", "bridge=success"]
+
+
+def test_main_status_steht_auch_im_stoerungsfall_vor_dem_kommentar(monkeypatch, tmp_path):
+    lauf = Lauf(monkeypatch, tmp_path, "Ein handgeschriebener PR-Text.",
+                {"review-start": START, "review-result": quittung("approve")})
+    assert lauf.starten() == 1
+    stelle = _erster_kommentar(lauf)
+    assert [e[1] for e in lauf.ablauf[:stelle]] == ["entwicklung-review=pending",
+                                                    "entwicklung-review=error"]
+
+
+def test_main_bei_ueberholtem_head_gibt_es_gar_keinen_kommentar(monkeypatch, tmp_path):
+    """Der dritte Ausgang: ein neuer HEAD. Kein Urteil, kein Kommentar."""
+    lauf = Lauf(monkeypatch, tmp_path, MIT_FELD,
+                {"review-start": START, "review-result": quittung("approve")})
+    ruf = {"n": 0}
+
+    def wechselnd(args):
+        if "view" in args:
+            ruf["n"] += 1
+            if ruf["n"] > 1:
+                return json.dumps({"headRefOid": "c" * 40, "state": "OPEN",
+                                   "body": MIT_FELD, "files": [{"path": "a.py"}]})
+        return lauf._github(args)
+
+    monkeypatch.setattr(b, "github", wechselnd)
+    assert lauf.starten() == 0
+    assert lauf.kommentare == []
+    assert lauf.tor()[1] == "error"
+
+
+# --------------------------------------------------------------------------
+# TAPETE-Gegenprobe: im Regelfall aendert sich NICHTS
+#
+# 180 Vergleiche ueber alle Verdikte x Pruefer x Sperrvermerke gegen den
+# festgeschriebenen Erwartungswert. Eine Aenderung an `tor_text()` oder
+# `codex_urteil()`, die den gesunden Lauf beruehrt, faellt hier auf.
+# --------------------------------------------------------------------------
+
+VERDIKTE = ["approve", "needs_changes", "unavailable", None, "unsinn"]
+PRUEFER = ["grok", "claude", "gemini", None, "mistral", ""]
+SPERRLAGEN = [
+    [],
+    [{"vendor": "chatgpt", "reason": "usage-limit"}],
+    [{"vendor": "grok", "reason": "usage-limit"}],
+    [{"vendor": "chatgpt", "reason": "nutzungsgrenze"},
+     {"vendor": "gemini", "reason": "usage-limit"}],
+    [{"vendor": "unsinn", "reason": "x"}],
+    [{"vendor": "chatgpt", "reason": None}],
+]
+
+
+def test_tapete_180_vergleiche_ueber_tor_text_und_codex_urteil():
+    faelle = 0
+    for value in VERDIKTE:
+        for pruefer in PRUEFER:
+            for sperren in SPERRLAGEN:
+                faelle += 1
+                zusammen = b.sperren_zusammenfuehren(sperren)
+                text = b.tor_text(value, pruefer, zusammen)
+                assert len(text) <= 140
+                # Eine Verdikt-Marke gibt es nur bei bekanntem Paar.
+                marke = "[llc-tor:" + str(pruefer) + "/" + str(value) + "]"
+                erwartet = (pruefer in b.VENDORS
+                            and value in {"approve", "needs_changes", "unavailable"})
+                assert (marke in text) is erwartet
+                # Und ohne Sperrvermerk fuer chatgpt ist das Codex-Tor
+                # unzustaendig — der Regelfall bleibt unberuehrt.
+                sperre = next((s for s in zusammen if s["vendor"] == "chatgpt"), None)
+                urteil = b.codex_urteil(value, pruefer, sperre)
+                if sperre is None:
+                    assert urteil is None
+                else:
+                    assert urteil[0] in {"success", "failure"}
+                    assert (urteil[0] == "success") is (value == "approve"
+                                                        and pruefer in b.VENDORS)
+    assert faelle == 180
+
+
+# --------------------------------------------------------------------------
+# Befund 5: DIE ZEITKETTE — Modellzug < Frist < Workflow-Deckel
+#
+# Drei Grenzen an drei Orten, und die kleinste gewinnt immer. Seit dieser
+# Bruecke wird ein Abbruch ohne Urteil zur `Stoerung` und damit zu ROT: laeuft
+# die mittlere Grenze ab, waehrend der Pruefer noch arbeitet, faerbt ein
+# GESUNDER Pruefzug das Pflichttor rot. Am 10.09.2026 gemessen — sieben PRs
+# trugen „Pruefer A ausgefallen", der Pruefer war gesund.
+#
+# ⚠ Diese Proben PRUEFEN die Ordnung, sie wiederholen die Zahlen nicht. Sie
+# haengen an keiner Formulierung: die Frist wird aus dem Modul gelesen UND
+# gemessen (was `collect()` wirklich faehrt), der Deckel aus der YAML-Datei.
+# Wer eine der drei Zahlen anfasst und die anderen stehen laesst, wird hier
+# rot — das ist der einzige Zweck dieses Abschnitts.
+# --------------------------------------------------------------------------
+
+WORKFLOW = Path(__file__).resolve().parents[1] / "distribution" / "entwicklung-review.yml"
+
+
+def _kette(name):
+    """Ein Glied der Kette aus dem Bruecken-Modul, mit benanntem Fehlschlag."""
+    wert = getattr(b, name, None)
+    assert isinstance(wert, int) and not isinstance(wert, bool) and wert > 0, (
+        name + " fehlt in " + QUELLE.name + " oder ist keine positive Zahl: die "
+        "Zeitkette steht dann als nackte Zahl im Rumpf und ist unbewacht — "
+        "genau der Zustand, den dieser Abschnitt abschafft.")
+    return wert
+
+
+def _workflow_deckel():
+    """`timeout-minutes` des Review-Jobs in SEKUNDEN, aus der Datei gelesen.
+
+    Kommentarzeilen fliegen vorher raus: der Deckel ist eine Zahl im Bestand,
+    keine Zahl in einer Prosa-Zeile daneben.
+    """
+    zeilen = [z for z in WORKFLOW.read_text().splitlines()
+              if not z.lstrip().startswith("#")]
+    treffer = re.findall(r"^\s*timeout-minutes:\s*([0-9]+)\s*$",
+                         "\n".join(zeilen), re.M)
+    assert len(treffer) == 1, (
+        "genau EIN timeout-minutes erwartet in " + WORKFLOW.name + ", gefunden: "
+        + repr(treffer) + " — ein zweiter Job ohne eigenen Deckel oder ein "
+        "zweiter Deckel macht die Kette mehrdeutig.")
+    return int(treffer[0]) * 60
+
+
+class _Uhr:
+    """Simulierte Zeit fuer `collect()`: `sleep()` stellt sie vor, sonst steht sie.
+
+    Ersetzt `b.time` als Ganzes — nicht die Stdlib. Das Modul benutzt `time`
+    ausschliesslich in `collect()`, und eine echte Frist auszusitzen waere in
+    einer Probe keine Messung, sondern eine halbe Stunde Wartezeit.
+    """
+
+    def __init__(self):
+        self.jetzt = 0.0
+
+    def monotonic(self):
+        return self.jetzt
+
+    def sleep(self, dauer):
+        self.jetzt += dauer
+
+
+def _frist_messen(monkeypatch, frist=None):
+    """Faehrt `collect()` bis zum Fristablauf und gibt (Sekunden, Abrufe) zurueck.
+
+    Der Pruefer antwortet nie — gemessen wird also genau die Frist, die die
+    Schleife WIRKLICH faehrt, nicht die, die irgendwo als Zahl steht.
+    """
+    uhr = _Uhr()
+    monkeypatch.setattr(b, "time", uhr)
+    if frist is not None:
+        monkeypatch.setattr(b, "FRIST_SEKUNDEN", frist)
+    abrufe = {"n": 0}
+
+    def nie_fertig(key, hosts, args, timeout=120):
+        if args[0] == "review-start":
+            return dict(START)
+        abrufe["n"] += 1
+        return {"ok": True}
+
+    monkeypatch.setattr(b, "remote", nie_fertig)
+    with pytest.raises(b.Stoerung):
+        b.collect("key", "hosts", "Paul-Brandenburg-LLC/llc-ops-backlog",
+                  17, HEAD, "claude")
+    return uhr.jetzt, abrufe["n"]
+
+
+def test_zeitkette_steht_aufsteigend():
+    """⛔ Modellzug < Frist < Deckel, mit benanntem Mindestabstand.
+
+    Die Untergrenze (Modellzug) liegt in einem ANDEREN Repo
+    (llc-ops-backlog, deploy/entwicklung-box/entwicklung_delivery.py) und ist
+    von hier aus nicht messbar. Sie steht deshalb als benannte Annahme im
+    Bruecken-Modul; diese Probe haelt die beiden anderen Glieder daran fest.
+    """
+    modellzug = _kette("MODELLZUG_DECKEL")
+    abstand = _kette("KETTEN_MINDESTABSTAND")
+    frist = _kette("FRIST_SEKUNDEN")
+    deckel = _workflow_deckel()
+    assert frist >= modellzug + abstand, (
+        "Frist %d s laesst dem Modellzug (%d s) keine %d s Luft: die Bruecke "
+        "gibt auf, waehrend der Pruefer noch arbeitet — und das ist seit "
+        "Kapitel 5 ROT fuer einen gesunden Lauf." % (frist, modellzug, abstand))
+    # ⛔ Der Deckel traegt mehr als die Frist. Drei Kosten liegen ausserhalb
+    # des Fristzaehlers und werden trotzdem von ihm bezahlt: `review-start`
+    # davor, ein Nachzuegler-Abruf (die Schleife darf ihn eine Sekunde vor der
+    # Frist noch starten, und er laeuft einen vollen SSH-Deckel lang) und
+    # `health` danach. Wer nur `frist + abstand` verlangt, rechnet den
+    # Mindestabstand ein zweites Mal aus — er ist dann laengst verbraucht.
+    ausserhalb = 2 * _kette("SSH_DECKEL") + _kette("NACHLAUF_HEALTH")
+    assert deckel >= frist + ausserhalb + abstand, (
+        "Workflow-Deckel %d s traegt Frist (%d s) plus %d s ausserhalb des "
+        "Fristzaehlers (review-start, Nachzuegler-Abruf, health) nicht mit %d s "
+        "Luft: der Job stirbt, bevor die Bruecke Status, Bericht und Kommentar "
+        "geschrieben hat." % (deckel, frist, ausserhalb, abstand))
+
+
+def test_die_deckel_ausserhalb_der_frist_werden_gefahren(monkeypatch):
+    """Tapete-Gegenprobe: `SSH_DECKEL` und `NACHLAUF_HEALTH` sind keine Prosa.
+
+    ⛔ Stuenden die beiden Zahlen nur im Kommentar oder als Vorgabewert von
+    `remote()`, rechnete `test_zeitkette_steht_aufsteigend` mit Kosten, die die
+    Aufrufe gar nicht haben — und der Workflow-Deckel waere wieder zu knapp,
+    ohne dass irgendetwas rot wird. Gemessen wird darum, was ankommt.
+    """
+    gesehen = []
+
+    def merken(key, hosts, args, timeout=None):
+        gesehen.append((args[0], timeout))
+        if args[0] == "review-start":
+            return dict(START)
+        if args[0] == "health":
+            return {"ok": True, "vendor_blocks": []}
+        return {"ok": True, "result": {"verdict": "approve", "findings": []},
+                "head_sha": HEAD}
+
+    monkeypatch.setattr(b, "remote", merken)
+    b.collect("key", "hosts", "Paul-Brandenburg-LLC/llc-ops-backlog", 17, HEAD, "claude")
+    b.sperren_von_der_box("key", "hosts")
+
+    gefahren = dict(gesehen)
+    assert gefahren["review-start"] == _kette("SSH_DECKEL"), gesehen
+    assert gefahren["review-result"] == _kette("SSH_DECKEL"), gesehen
+    assert gefahren["health"] == _kette("NACHLAUF_HEALTH"), gesehen
+
+
+def test_die_gefahrene_frist_ist_die_eingetragene(monkeypatch):
+    """Die Kette bewacht nur dann etwas, wenn `collect()` die Konstante faehrt.
+
+    ⛔ Stuende die Frist als nackte Zahl im Rumpf — oder als Vorgabewert im
+    Funktionskopf, der beim Import gebunden wird —, pruefte
+    `test_zeitkette_steht_aufsteigend` einen Wert, den niemand benutzt.
+    """
+    assert _frist_messen(monkeypatch, 600) == (600, 40)
+    assert _frist_messen(monkeypatch, 1200) == (1200, 80)
+
+
+def test_die_gefahrene_frist_traegt_die_kette(monkeypatch):
+    """Gemessen statt gelesen: was die Schleife faehrt, haelt die Ordnung ein."""
+    gefahren, abrufe = _frist_messen(monkeypatch)
+    assert gefahren >= _kette("MODELLZUG_DECKEL") + _kette("KETTEN_MINDESTABSTAND"), (
+        "gefahrene Frist: %d s" % gefahren)
+    ausserhalb = 2 * _kette("SSH_DECKEL") + _kette("NACHLAUF_HEALTH")
+    assert gefahren + ausserhalb + _kette("KETTEN_MINDESTABSTAND") <= _workflow_deckel(), (
+        "gefahrene Frist: %d s, ausserhalb des Zaehlers: %d s" % (gefahren, ausserhalb))
+    assert abrufe == gefahren // _kette("ABRUF_TAKT")
+
+
+def test_ein_ergebnis_beendet_die_frist_sofort(monkeypatch):
+    """Tapete-Gegenprobe zur Kette: der Regelfall wartet KEINE Frist ab.
+
+    Die laengere Frist darf einen gesunden Lauf nicht verlangsamen — sie ist
+    eine Obergrenze, kein Takt.
+    """
+    uhr = _Uhr()
+    monkeypatch.setattr(b, "time", uhr)
+    fertig = {"ok": True, "head_sha": HEAD, "result": {"head_sha": HEAD}}
+
+    def sofort(key, hosts, args, timeout=120):
+        return dict(START) if args[0] == "review-start" else dict(fertig)
+
+    monkeypatch.setattr(b, "remote", sofort)
+    assert b.collect("key", "hosts", "Paul-Brandenburg-LLC/llc-ops-backlog",
+                     17, HEAD, "claude") == fertig
+    assert uhr.jetzt == 0.0

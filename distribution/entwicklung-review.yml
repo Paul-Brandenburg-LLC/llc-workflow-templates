@@ -32,7 +32,31 @@ jobs:
   # Erzeuger (2e-(i)) und sperrte jeden PR dieses Repos aus.
   entwicklung-review:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # OBERSTES Glied der Zeitkette, in MINUTEN (40 = 2400 s).
+    #
+    #     Modellzug 1500 s  <  Frist 1800 s  <  dieser Deckel 2400 s
+    #
+    # ⛔ Warum 40 und nicht 35: KETTEN_MINDESTABSTAND (300 s) ist die Luft, die
+    # die Probe VERLANGT, nicht die Luft, die uebrig BLEIBT. Zwei Kosten dieses
+    # Jobs liegen ausserhalb des Fristzaehlers von collect(): `review-start`
+    # laeuft davor (remote(..., timeout=120)) und `health` danach (bis 60 s).
+    # Bei 35 min blieben von den 300 s also nur ~120 s fuer Vorlauf (checkout,
+    # Python-Start) und Auslauf (Status, Bericht, PR-Kommentar, Aufraeumen) —
+    # gemessen ~86 s. Ein Job, der mitten im Schreiben endet, hinterlaesst genau
+    # den halb geschriebenen Ausgang, den Kapitel 5 abschafft. 40 min machen die
+    # 300 s echt.
+    #
+    # Die beiden unteren Glieder stehen in
+    # .github/scripts/entwicklung_review_bridge.py (MODELLZUG_DECKEL,
+    # FRIST_SEKUNDEN) — dort steht auch, warum die Kette aufsteigend stehen
+    # MUSS. Kurz: die kleinste Grenze gewinnt, und ein Abbruch ohne Urteil ist
+    # seit Kapitel 5 ROT. Ein Deckel unter der Frist faerbt einen gesunden
+    # Pruefzug rot, bevor die Bruecke ihren Ausgang schreiben kann.
+    #
+    # ⛔ Wer hier dreht, dreht an einer Kette: die Probe „Zeitkette" in
+    # tests/test_entwicklung_review_bridge.py liest genau diese Zahl und
+    # verlangt KETTEN_MINDESTABSTAND Luft ueber der Frist.
+    timeout-minutes: 40
     steps:
       # Only trusted base code executes. PR contents are review data, never code.
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.2.2

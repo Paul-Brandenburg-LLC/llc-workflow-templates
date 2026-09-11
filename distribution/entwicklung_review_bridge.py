@@ -31,12 +31,106 @@ CONTEXT = "entwicklung-review"
 # Required-Check, den das Repo tatsaechlich fuehrt.
 CODEX_CONTEXTS = ("gate-2-codex", "bridge")
 CODEX_VENDOR = "chatgpt"
-# Wortlaut der Nutzungsgrenze — die Meldungen, die der Codex-Bot bzw. die Box
-# (`entwicklung_provider.py`) bei erschoepftem Kontingent ausgibt.
+# ⛔ EXAKTER Login, kein Praefix. `(?i)^(chatgpt-codex-connector|codex|openai)`
+# traf jeden Namen, der so ANFAENGT — `codexplorer` ebenso wie jeden Nutzer
+# namens `openai-fan`. Seit der Ausfall die Marke im Status-Text traegt (und
+# damit den Sofort-Weg des Codex-Tors), entscheidet dieser Vergleich ueber ein
+# Pflichttor; er muss dicht sein. Kleingeschrieben, weil GitHub-Logins nicht
+# nach Gross-/Kleinschreibung unterschieden werden.
+CODEX_AUTOREN = frozenset({"chatgpt-codex-connector[bot]"})
+# Wortlaut der Nutzungsgrenze — eng an den Satz gebunden, mit dem der Codex-Bot
+# bzw. die Box (`entwicklung_provider.py`) ein erschoepftes Kontingent meldet.
+#
+# ⛔ `rate limit` und `usage cap` standen hier frei im Text und kommen in
+# normaler Pruefprosa vor: „the client has no rate limit handling" ist ein
+# Befund, kein Ausfall. Ein echtes Codex-Review haette sich damit selbst zum
+# Ausgefallenen erklaert — und das Tor auf den Box-Pruefer umgeleitet, obwohl
+# Codex gerade geantwortet hat. Jede Alternative unten nennt Grenze UND
+# Erreichen; ein blosses Vorkommen des Wortes genuegt nicht mehr.
 QUOTA_WORTLAUT = re.compile(
-    r"(?i)(usage limit|nutzungsgrenze|rate limit|quota exceeded|quota erreicht"
-    r"|usage cap|out of credits|kontingent (?:erschoepft|erschöpft|aufgebraucht))")
-CODEX_AUTOR = re.compile(r"(?i)^(chatgpt-codex-connector|codex|openai)")
+    r"(?i)(?:"
+    r"(?:codex\s+)?usage\s+limits?\s+(?:reached|exceeded|hit)"
+    r"|(?:hit|reached|exceeded)\s+(?:your|the|its)\s+(?:codex\s+)?usage\s+limits?"
+    r"|nutzungsgrenze\s+(?:erreicht|ueberschritten|überschritten)"
+    r"|kontingent\s+(?:erschoepft|erschöpft|aufgebraucht)"
+    r"|quota\s+(?:exceeded|erreicht|erschoepft|erschöpft)"
+    r"|out\s+of\s+credits"
+    r")")
+# GitHub schreibt `created_at` ueberall in dieser einen Form, UTC mit `Z`.
+# Genau deshalb darf der Altersvergleich ein reiner Textvergleich sein — zwei
+# Zeitstempel derselben Form ordnen lexikografisch wie chronologisch. Was
+# dieser Form nicht entspricht, wird nicht geraten, sondern verworfen.
+ZEITSTEMPEL = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+
+# --------------------------------------------------------------------------
+# DIE ZEITKETTE. ⛔ Sie MUSS aufsteigend stehen:
+#
+#     Modellzug  <  Frist dieser Bruecke  <  Deckel des Workflows
+#
+# Drei Grenzen an drei Orten, und die kleinste gewinnt immer. Steht die Kette
+# nicht aufsteigend, toetet die mittlere Grenze einen Lauf, dessen Pruefer
+# noch arbeitet — und seit dieser Bruecke wird ein Abbruch ohne Urteil zur
+# `Stoerung` und damit zu ROT. Ein GESUNDER Pruefzug faerbt dann das
+# Pflichttor rot. Genau das ist am 10.09.2026 gemessen worden: sieben PRs
+# trugen „Pruefer A ausgefallen", waehrend der Pruefer gesund war.
+#
+# Bewacht wird die Ordnung, nicht wiederholt: siehe
+# tests/test_entwicklung_review_bridge.py, Abschnitt „Zeitkette". Die Probe
+# liest die Frist hier, den Deckel aus entwicklung-review.yml und misst die
+# Frist, die `collect()` TATSAECHLICH faehrt.
+# --------------------------------------------------------------------------
+
+# Untergrenze der Kette — der Modellzug des Box-Pruefers
+# (`complete(..., timeout=...)` in deploy/entwicklung-box/entwicklung_delivery.py,
+# Repo llc-ops-backlog). Er liegt in einem ANDEREN Repo und ist von hier aus
+# nicht messbar; deshalb steht er hier als benannte Annahme, damit ein
+# Nachfolger sieht, woran die Untergrenze haengt.
+#
+# ⛔ Wer diesen Deckel dort hebt, muss FRIST_SEKUNDEN hier mitheben — die Probe
+# faellt sonst rot, und das ist ihr Zweck. Gemessene Pruefzuege (n=58): Median
+# 312 s, p90 614 s, max 943 s; ein Lauf von Hand ueber denselben Diff brauchte
+# 1279,9 s. Die alten 600 s lagen UNTER dem p90 und toeteten planmaessig
+# gesunde Laeufe.
+MODELLZUG_DECKEL = 1500
+
+# Luft zwischen zwei Gliedern der Kette. Nach unten (ueber dem Modellzug)
+# deckt sie den Rest des Box-Laufs ab, den der Modellzug nicht enthaelt —
+# Vorbereitung, Quittung schreiben — plus einen vollen Abrufzyklus
+# (ABRUF_TAKT) und den SSH-Aufruf, der ihn holt (`remote(..., timeout=120)`).
+# Nach oben (unter dem Workflow-Deckel) deckt sie den Vorlauf des Jobs
+# (checkout, Python-Start) und den Auslauf der Bruecke ab: Status schreiben,
+# Bericht rendern, PR-Kommentar, Aufraeumen. Ohne diese Luft endet der Job
+# mitten im Schreiben — und ein halb geschriebener Ausgang ist genau der
+# Zustand, den Kapitel 5 abschafft.
+KETTEN_MINDESTABSTAND = 300
+
+# Takt, in dem `collect()` nach dem Ergebnis fragt.
+ABRUF_TAKT = 15
+
+# Mittleres Glied: die Frist, die `collect()` dem Pruefer einraeumt.
+#
+# ⛔ Eine LITERALE Zahl, kein `MODELLZUG_DECKEL + KETTEN_MINDESTABSTAND`.
+# Waere sie gerechnet, koennte die Kettenprobe fuer diese Haelfte nie
+# anschlagen — sie pruefte ihre eigene Rechnung nach. Eine Wache, die im
+# Regelfall nicht anschlagen KANN, ist eine Tapete.
+FRIST_SEKUNDEN = 1800
+
+# Die drei Kosten, die AUSSERHALB des Fristzaehlers von collect() liegen und
+# den Workflow-Deckel trotzdem belasten. Ohne sie liest sich
+# KETTEN_MINDESTABSTAND wie uebrige Luft, obwohl er vorher schon aufgebraucht
+# ist — bei `timeout-minutes: 35` blieb rechnerisch NICHTS uebrig.
+#
+#   1. `review-start` laeuft VOR `deadline = ... + FRIST_SEKUNDEN`.
+#   2. Ein NACHZUEGLER-Abruf: die Schleife prueft `monotonic() < deadline` und
+#      startet den letzten `review-result`-Abruf notfalls eine Sekunde davor —
+#      der darf dann noch einen vollen SSH-Deckel lang laufen.
+#   3. `health` in sperren_von_der_box() laeuft NACH dem Urteil.
+#
+# ⛔ Beide stehen als LITERALE Zahlen und werden an ihren Aufrufstellen
+# uebergeben, nicht als Vorgabewert gebunden — sonst bewachte die Kettenprobe
+# einen Wert, den niemand faehrt.
+SSH_DECKEL = 120
+NACHLAUF_HEALTH = 60
 
 
 class Stoerung(ValueError):
@@ -85,9 +179,30 @@ def writer(body):
 
 
 def status(repo, head, value, description, context=CONTEXT):
-    github(["api", "--method", "POST", f"repos/{repo}/statuses/{head}",
-            "-f", "context=" + context, "-f", "state=" + value,
-            "-f", "description=" + description[:140]])
+    """Setzt einen Status und gibt die Antwort von GitHub zurueck.
+
+    Die Antwort traegt `created_at` — die App-geschriebene, an genau diesen
+    Commit gebundene Zeit, an der die Ausfall-Erkennung ihr Alter misst
+    (`status_zeit()`). Sie faellt hier ohne zusaetzlichen Abruf ab.
+    """
+    return github(["api", "--method", "POST", f"repos/{repo}/statuses/{head}",
+                   "-f", "context=" + context, "-f", "state=" + value,
+                   "-f", "description=" + description[:140]])
+
+
+def status_zeit(antwort):
+    """`created_at` aus der Antwort eines Status-POST; '' heisst unbekannt.
+
+    ⛔ Nicht `committer.date`: die steht im Commit-Objekt und ist vom PR-Autor
+    frei setzbar (`GIT_COMMITTER_DATE`). Genau daran zerbrach schon die Frist
+    des Codex-Tors — ein zurueckdatierter Commit waehlte Codex ab. Der Status
+    dagegen wird von der App geschrieben und haengt am HEAD.
+    """
+    try:
+        wert = json.loads(antwort).get("created_at")
+    except (AttributeError, TypeError, ValueError):
+        return ""
+    return wert if isinstance(wert, str) and ZEITSTEMPEL.fullmatch(wert) else ""
 
 
 def status_lesen(repo, head, context):
@@ -342,7 +457,7 @@ def sperren_von_der_box(key, hosts):
     nennt genau sie. Bis dahin traegt `sperre_aus_ergebnis()` die Erkennung.
     """
     try:
-        antwort = remote(key, hosts, ["health"], timeout=60)
+        antwort = remote(key, hosts, ["health"], timeout=NACHLAUF_HEALTH)
     except (RuntimeError, ValueError, OSError, subprocess.SubprocessError):
         print("::warning::Box-health nicht erreichbar — `health` fehlt in der "
               "Allowlist von deploy/entwicklung-box/entwicklung-release-control; "
@@ -355,40 +470,104 @@ def sperren_von_der_box(key, hosts):
 
 
 def collect(key, hosts, repo, number, head, actual_writer):
-    started = remote(key, hosts, ["review-start", ALIASES[repo], str(number), head, actual_writer])
+    """Auftrag auf der Box starten und bis FRIST_SEKUNDEN auf das Urteil warten.
+
+    ⛔ Die Frist ist das MITTLERE Glied der Zeitkette (siehe Kopf der Datei).
+    Laeuft sie ab, waehrend der Pruefer noch arbeitet, endet der Lauf als
+    `Stoerung` — und das heisst ROT fuer einen gesunden Pruefzug. Die Frist
+    gehoert deshalb ueber den Modellzug-Deckel der Box und unter den
+    `timeout-minutes` des Workflows.
+
+    Die Konstante wird hier zur LAUFZEIT gelesen, nicht als Vorgabewert im
+    Kopf gebunden: ein Vorgabewert wuerde beim Import festgeschrieben, und die
+    Kettenprobe bewachte dann einen Wert, den diese Schleife gar nicht faehrt.
+    """
+    started = remote(key, hosts, ["review-start", ALIASES[repo], str(number), head,
+                               actual_writer], timeout=SSH_DECKEL)
     jid = started.get("job_id", "")
     if started.get("head_sha") != head or not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9]+", jid):
         raise Stoerung("Auftragskennung ungueltig")
-    deadline = time.monotonic() + 900
+    deadline = time.monotonic() + FRIST_SEKUNDEN
     while time.monotonic() < deadline:
-        outcome = remote(key, hosts, ["review-result", jid, head])
+        outcome = remote(key, hosts, ["review-result", jid, head], timeout=SSH_DECKEL)
         if "result" in outcome:
             return outcome
-        time.sleep(15)
+        time.sleep(ABRUF_TAKT)
     raise Stoerung("Pruefer-Auftrag ohne Ergebnis binnen Frist")
 
 
-def codex_meldung_am_pr(repo, number):
-    """Nennt eine Codex-Meldung am PR die Nutzungsgrenze? Zweite Ausfall-Quelle.
+def codex_ausfall_in_meldungen(roh, seit):
+    """Nennt eine Codex-Meldung NACH `seit` die Nutzungsgrenze?
 
-    Whitespace wird in jq zusammengezogen, damit jeder Kommentar genau EINE
-    Zeile belegt — ein mehrzeiliger Text wuerde die Zuordnung Autor/Text sonst
-    zerreissen und einem fremden Autor die Meldung zuschreiben.
+    `roh` ist die Zeilenform aus `codex_meldung_am_pr()`:
+    `<created_at>\t<login>\t<einzeiliger Text>`. Reine Funktion, offline
+    beweisbar — der Abruf steht daneben.
+
+    ⛔ Drei Riegel, jeder einzeln noetig, seit diese Erkennung das Pflichttor
+    traegt (sie steht im `sperren`-Trichter und faerbt die Marke im
+    Status-Text):
+      * HEAD-Bindung: ohne brauchbares `seit` ist die Erkennung AUS. Sonst
+        gilt eine Nutzungsgrenze von vorgestern — aus einem Kommentar zu einem
+        laengst ueberholten Commit — als laufender Ausfall.
+      * Autor: exakter Login, kein Praefix.
+      * Wortlaut: Grenze UND Erreichen, nicht das blosse Wort.
+    Nicht ermittelbar heisst nicht raten.
     """
-    roh = github_weich(["api", "--paginate", "repos/" + repo + "/issues/" + str(number) + "/comments",
-                        "--jq", '.[] | ((.user.login // "") + "	" + ((.body // "") | gsub("\\\\s+"; " ")))'])
-    for zeile in roh.splitlines():
-        autor, _, text = zeile.partition("	")
-        if CODEX_AUTOR.search(autor.strip()) and QUOTA_WORTLAUT.search(text):
+    if not ZEITSTEMPEL.fullmatch(str(seit or "")):
+        return False
+    for zeile in (roh or "").splitlines():
+        wann, _, rest = zeile.partition("\t")
+        autor, _, text = rest.partition("\t")
+        wann = wann.strip()
+        # Beide Zeiten kommen von GitHub in derselben UTC-Form; der Vergleich
+        # ist deshalb ein Textvergleich ohne Zeitzonen-Rechnung. Was der Form
+        # nicht entspricht, zaehlt nicht — auch das ist „nicht raten".
+        if not ZEITSTEMPEL.fullmatch(wann) or wann < seit:
+            continue
+        if autor.strip().lower() in CODEX_AUTOREN and QUOTA_WORTLAUT.search(text):
             return True
     return False
 
 
-def codex_ausweichen(repo, head, number, value, pruefer, sperren):
-    """Setzt gate-2-codex/bridge, wenn Codex ausgefallen ist. Sonst nichts."""
-    sperre = next((s for s in sperren if s["vendor"] == CODEX_VENDOR), None)
-    if sperre is None and codex_meldung_am_pr(repo, number):
-        sperre = {"vendor": CODEX_VENDOR, "reason": "nutzungsgrenze", "until": None}
+def codex_meldung_am_pr(repo, number, seit):
+    """Holt die PR-Kommentare und legt sie `codex_ausfall_in_meldungen()` vor.
+
+    Whitespace wird in jq zusammengezogen, damit jeder Kommentar genau EINE
+    Zeile belegt — ein mehrzeiliger Text wuerde die Zuordnung Zeit/Autor/Text
+    sonst zerreissen und einem fremden Autor die Meldung zuschreiben.
+    """
+    roh = github_weich(["api", "--paginate", "repos/" + repo + "/issues/" + str(number) + "/comments",
+                        "--jq", '.[] | ((.created_at // "") + "\\t" + (.user.login // "")'
+                                ' + "\\t" + ((.body // "") | gsub("\\\\s+"; " ")))'])
+    return codex_ausfall_in_meldungen(roh, seit)
+
+
+def sperre_aus_codex_meldung(repo, number, seit):
+    """Der Codex-Ausfall als Sperrvermerk — dritte Quelle desselben Trichters.
+
+    ⛔ Diese Quelle gehoert VOR `tor_text()`, nicht erst in `codex_ausweichen()`.
+    Im Hauptfall, fuer den Kapitel 5 gebaut ist (Box gibt `approve`, Codex
+    schweigt an der Nutzungsgrenze), liefern die beiden anderen Quellen nichts:
+    `health` steht nicht in der Allowlist des Zwangskommandos, und
+    `sperre_aus_ergebnis()` schweigt, weil das Verdikt eben `approve` ist. Der
+    Status-Text trug deshalb keine `[llc-ausfall:chatgpt/…]`-Marke — und der
+    Sofort-Weg des Codex-Tors, der genau an ihr haengt, feuerte nie. Uebrig
+    blieb der 45-Minuten-Fristweg.
+    """
+    if not codex_meldung_am_pr(repo, number, seit):
+        return []
+    return [{"vendor": CODEX_VENDOR, "reason": "nutzungsgrenze", "until": None}]
+
+
+def codex_ausweichen(repo, head, value, pruefer, sperren):
+    """Setzt gate-2-codex/bridge, wenn Codex ausgefallen ist. Sonst nichts.
+
+    Sucht nicht mehr selbst — der Ausfall steht bereits in `sperren`, ermittelt
+    am gemeinsamen Trichter, bevor der Status-Text entstand. Eine zweite
+    Erkennung an dieser Stelle waere eine halbe Regel: sie faerbte das
+    Codex-Tor, waehrend der Box-Status den Ausfall verschwiege.
+    """
+    sperre = next((s for s in sperren or [] if s["vendor"] == CODEX_VENDOR), None)
     urteil = codex_urteil(value, pruefer, sperre)
     if urteil is None:
         return
@@ -403,6 +582,14 @@ def codex_ausweichen(repo, head, number, value, pruefer, sperren):
     print("::warning::" + text)
 
 
+def kommentieren(repo, number, body):
+    """Der PR-Kommentar. Er kommt in JEDEM Ausgang NACH dem Status."""
+    with tempfile.NamedTemporaryFile("w", suffix=".md") as file:
+        file.write(body)
+        file.flush()
+        github(["pr", "comment", str(number), "--repo", repo, "--body-file", file.name])
+
+
 def main():
     repo = os.environ["GITHUB_REPOSITORY"]
     if repo not in ALIASES:
@@ -415,7 +602,14 @@ def main():
     head = info["headRefOid"]
     if not re.fullmatch(r"[0-9a-f]{40}", head) or info["state"] != "OPEN":
         raise ValueError("open PR with exact SHA required")
-    status(repo, head, "pending", "Prüfer-Auftrag auf der Entwicklung")
+    # Der HEAD-Anker der Ausfall-Erkennung: `created_at` DIESES Status. Er
+    # faellt aus der Antwort des POST ab, den dieser Lauf ohnehin absetzt —
+    # kein Zusatzabruf, app-geschrieben, an genau diesen Commit gebunden.
+    seit = status_zeit(status(repo, head, "pending", "Prüfer-Auftrag auf der Entwicklung"))
+    if not seit:
+        print("::warning::created_at des eigenen pending-Status nicht lesbar — "
+              "ein Codex-Ausfall wird in diesem Lauf nicht aus PR-Meldungen "
+              "erkannt (nicht geraten); health und review-result tragen weiter")
     reason, pruefer, sperren, stoerung = "", None, [], ""
     key = os.environ.pop("DEVELOPMENT_DEPLOY_KEY", "")
     hosts = os.environ.pop("DEVELOPMENT_KNOWN_HOSTS", "")
@@ -437,12 +631,21 @@ def main():
                 value, review = validate(outcome, head, {p["path"] for p in info["files"]}, actual_writer)
                 if value == "unavailable":
                     reason = result.get("reason") or "Prüfer-Auftrag ohne verwendbares Urteil beendet"
+                # ⛔ DREI Quellen, EIN Trichter. Die dritte (`codex_meldung_am_pr`)
+                # stand frueher allein in `codex_ausweichen()` und lief damit
+                # NACH `tor_text()`: im Hauptfall — Box gibt `approve`, Codex
+                # schweigt an der Nutzungsgrenze — schwiegen die beiden anderen,
+                # der Status-Text trug keine `[llc-ausfall:chatgpt/…]`-Marke, und
+                # der Sofort-Weg des Codex-Tors feuerte nie.
                 sperren = sperren_zusammenfuehren(sperren_von_der_box(private, known),
-                                                  sperre_aus_ergebnis(result))
+                                                  sperre_aus_ergebnis(result),
+                                                  sperre_aus_codex_meldung(repo, number, seit))
             except BaseException:
                 # Der Sperrvermerk erklaert auch einen gescheiterten Prueflauf.
                 # Er wird gelesen, SOLANGE das Schluesselverzeichnis noch steht.
-                sperren = sperren_von_der_box(private, known)
+                # Auch hier durch denselben Trichter: eine halbe Regel waere keine.
+                sperren = sperren_zusammenfuehren(sperren_von_der_box(private, known),
+                                                  sperre_aus_codex_meldung(repo, number, seit))
                 raise
     # ⛔ Zwei GRUNDVERSCHIEDENE Faelle, die frueher denselben Ausgang hatten.
     #
@@ -473,10 +676,16 @@ def main():
     if len(body) > 60000:
         # Preserve a negative verdict even when the prose exceeds GitHub's limit.
         body = body[:59000] + "\n\nBericht gekürzt; vollständiges Urteil im Entwicklung-Job.\n### Verdikt\n" + value + "\n"
-    with tempfile.NamedTemporaryFile("w", suffix=".md") as file:
-        file.write(body)
-        file.flush()
-        github(["pr", "comment", str(number), "--repo", repo, "--body-file", file.name])
+    # ⛔ ERST der Status, DANN der Kommentar — in JEDEM Ausgang.
+    #
+    # `gh pr comment` loest `issue_comment` aus, und daran haengt
+    # gate-2-codex.yml. Stand der Kommentar vorn, sah dieser Lauf einen halben
+    # Zustand: `entwicklung-review` noch auf `pending`, `gate-2-codex` noch
+    # ohne Ausweichung. Er rechnete Codex erneut als `pending` und schrieb das
+    # ueber das `success`, das die Bruecke Sekunden spaeter setzte — die
+    # Bruecke machte ihre eigene Ausweichung mit ihrem eigenen Kommentar
+    # kaputt. Zweite Lage gegen denselben Fehler: `Post Status` in
+    # gate-2-codex.yml wertet ein fertiges Urteil nicht mehr auf `pending` ab.
     if stoerung:
         # ⛔ Rot, nicht gruen. Und das Codex-Tor wird NICHT angefasst: eine
         # Bruecke, die ihren eigenen Lauf nicht zu Ende gebracht hat, darf kein
@@ -484,11 +693,13 @@ def main():
         # entscheidet selbst — sein Ausweich-Schritt verlangt `success` UND
         # eine `approve`-Marke, findet hier beides nicht und blockiert.
         status(repo, head, "error", stoerung_text(stoerung, sperren))
+        kommentieren(repo, number, body)
         print("::error::Prüflauf gescheitert: " + stoerung + " — kein Urteil, Tor auf error")
         raise SystemExit(1)
     status(repo, head, "failure" if value == "needs_changes" else "success",
            tor_text(value, pruefer, sperren))
-    codex_ausweichen(repo, head, number, value, pruefer, sperren)
+    codex_ausweichen(repo, head, value, pruefer, sperren)
+    kommentieren(repo, number, body)
     if value == "unavailable":
         print("::warning::Prüfer A ausgefallen; keine Freigabe vorgetäuscht")
     if value == "needs_changes":

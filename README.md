@@ -26,6 +26,10 @@ Entscheidung: `scripts/verteilung-decide.sh`, Beweis
   `propagate-templates.yml` mit `template: entwicklung-review`.
   ⛔ Ziel-Repos nur die drei, die die Box kennt (`llc-ops-backlog`,
   `llc-paulbrandenburg-com-app`, `standards`).
+  ⛔ Das Paar wird als EINE Einheit entschieden (`verteilung_paar_modus`): ist
+  eine Haelfte Abweichler, wird KEINE angefasst und kein PR geoeffnet. Ein
+  Workflow ohne seine Bruecke laeuft bei jedem PR in „No such file" und laesst
+  genau das tote Pflichttor stehen, das Kapitel 5 verhindern soll.
 
 ### Reusable Workflows (`.github/workflows/`)
 
@@ -107,15 +111,80 @@ Box), wird vorher entschaerft. Das Codex-Tor liest sie
 und weicht aus; ein `success` ohne `approve`-Marke gibt es nicht, auch nicht
 beim fail-open des Box-Tors. Jeder Ausweich-Text nennt den Ausfall im Klartext.
 
-Beweise: `scripts/codex-ausweichung-selftest.sh` (30 Faelle; die
-Entscheidungsfunktion UND der ganze Ausweich-Schritt werden aus der
-Workflow-Datei gezogen, `gh` und die Statuses sind Attrappen) und
-`tests/test_entwicklung_review_bridge.py` (56 Faelle, `gh`/`ssh` als
+### Woher der Ausfall kommt — drei Quellen, ein Trichter
+
+Der Codex-Ausfall wird ermittelt, BEVOR der Status-Text entsteht, und zwar an
+dem einen Punkt, durch den alle Quellen laufen (`sperren_zusammenfuehren`):
+
+1. `health` der Box (`vendor_blocks`) — heute stumm, `health` steht nicht in
+   der Allowlist des Zwangskommandos;
+2. `review-result.reason` — traegt nur, wenn der Box-Pruefer selbst
+   `unavailable` meldet;
+3. die Meldung des Codex-Bots am PR — die Quelle, die im Hauptfall (Box gibt
+   `approve`, Codex schweigt an der Grenze) als einzige etwas weiss.
+
+⛔ Quelle 3 ist deshalb dicht gebaut: exakter Login `chatgpt-codex-connector[bot]`
+(kein Praefix — `codexplorer` fiel darunter), ein Wortlaut, der Grenze UND
+Erreichen nennt (ein blosses „rate limit" steht in normaler Pruefprosa), und
+eine HEAD-Bindung: es zaehlen nur Meldungen, die nach dem `created_at` des
+`pending`-Status entstanden sind, den die Bruecke selbst fuer diesen Commit
+schreibt. Nicht ermittelbar heisst nicht raten — dann ist Quelle 3 aus.
+
+### Die Zeitkette — Modellzug < Frist < Workflow-Deckel
+
+Drei Grenzen an drei Orten, und die kleinste gewinnt immer:
+
+| Glied | Wo | Wert |
+| --- | --- | --- |
+| Modellzug des Box-Pruefers | llc-ops-backlog, `entwicklung_delivery.py` | 1500 s (Annahme, hier nicht messbar) |
+| Frist der Bruecke | `FRIST_SEKUNDEN` in `entwicklung_review_bridge.py` | 1800 s |
+| Deckel des Workflows | `timeout-minutes` in `entwicklung-review.yml` | 40 min = 2400 s |
+
+Der oberste Deckel traegt mehr als die Frist. **Drei Kosten liegen ausserhalb
+des Fristzaehlers von `collect()` und werden trotzdem von ihm bezahlt:**
+`review-start` laeuft davor (`SSH_DECKEL`, 120 s), ein Nachzuegler-Abruf darf
+eine Sekunde vor der Frist noch starten und einen vollen SSH-Deckel lang laufen
+(120 s), und `health` laeuft danach (`NACHLAUF_HEALTH`, 60 s). Zusammen 300 s —
+genau der `KETTEN_MINDESTABSTAND`. Bei den urspruenglich gebauten 35 min war er
+damit rechnerisch aufgebraucht, bevor checkout, Python-Start und der Auslauf der
+Bruecke (Status, Bericht, PR-Kommentar, Aufraeumen) ueberhaupt begannen. 40 min
+machen ihn echt.
+
+⛔ Seit ein Abbruch ohne Urteil zur `Stoerung` und damit zu ROT wird, faerbt
+eine Frist unter dem Modellzug einen GESUNDEN Pruefzug rot: die Bruecke gibt
+auf, waehrend der Pruefer noch arbeitet. Am 10.09.2026 gemessen — sieben PRs
+trugen „Pruefer A ausgefallen", der Pruefer war gesund. Die Ordnung wird
+GEPRUEFT, nicht wiederholt: `test_zeitkette_steht_aufsteigend` liest die Frist
+aus der Bruecke und den Deckel aus der YAML-Datei, und
+`test_die_gefahrene_frist_traegt_die_kette` MISST mit simulierter Uhr, welche
+Frist `collect()` wirklich faehrt. `test_die_deckel_ausserhalb_der_frist_werden_gefahren`
+misst, dass `SSH_DECKEL` und `NACHLAUF_HEALTH` an den Aufrufen ankommen und nicht
+bloss im Kommentar stehen. Wer eine der Zahlen anfasst und die anderen stehen
+laesst, wird rot — gegengeprueft mit vier Mutanten (`timeout-minutes` 35 und 30,
+`review-start` ohne uebergebenen Deckel, `SSH_DECKEL` geschoent): jeder rot, der
+gesunde Stand gruen.
+
+### Zwei Lagen gegen den Selbst-Zurueckdreher
+
+Die Bruecke setzt in JEDEM Ausgang **erst den Status, dann den PR-Kommentar**:
+`gh pr comment` loest `issue_comment` aus, und daran haengt `gate-2-codex.yml`.
+Stand der Kommentar vorn, sah dieser Lauf einen halben Zustand und schrieb
+`pending` ueber die gerade gesetzte Ausweichung. Zweite Lage, unabhaengig davon,
+wer den Lauf ausloest: `Post Status` in `gate-2-codex.yml` ersetzt ein an diesem
+SHA schon stehendes `success`/`failure`/`error` nicht mehr durch `pending` —
+je Context geprueft, denn der Schritt bedient zwei.
+
+Beweise: `scripts/codex-ausweichung-selftest.sh` (36 Faelle; die
+Entscheidungsfunktion, der ganze Ausweich-Schritt UND der Post-Status-Schritt
+werden aus der Workflow-Datei gezogen, `gh` und die Statuses sind Attrappen)
+und `tests/test_entwicklung_review_bridge.py` (95 Faelle, `gh`/`ssh` als
 Attrappen). Die Faelle E1/E2 nageln fest, dass ein Box-Approve an einem
 AELTEREN Commit den neuen HEAD nicht freigibt; E3/E4, dass die Frist am
 App-geschriebenen `created_at` des Box-Status haengt und nicht an der vom
 PR-Autor setzbaren Git-Committer-Zeit; F1-F3, dass Fremdtext aus der Box die
-Verdikt-Marke nicht faelschen kann.
+Verdikt-Marke nicht faelschen kann; H1-H6, dass `pending` kein fertiges Urteil
+mehr abwertet (H2/H5/H6 als Gegenprobe, dass es trotzdem schreibt, wenn es
+soll).
 
 ## Tier
 

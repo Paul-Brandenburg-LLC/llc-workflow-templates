@@ -449,7 +449,15 @@ jobs:
           [ -n "$DEFAULT_BRANCH" ] || { echo "::warning::$REPO: default_branch nicht ermittelbar — skip"; exit 0; }
 
           BRANCH="chore/verteilung-entwicklung-review-${GITHUB_RUN_ID}"
-          ZU_TUN=""
+          # ⛔ ERST entscheiden, DANN schreiben — und entschieden wird ueber das
+          # PAAR, nicht ueber die einzelne Datei. Solange je Datei entschieden
+          # wurde, konnte eine Haelfte `abweichler` sein und die andere
+          # `create`/`update`: geschrieben wurde nur eine, der PR ging trotzdem
+          # auf, und das Zielrepo trug einen Workflow ohne Bruecke (oder
+          # umgekehrt) — genau das tote Pflichttor, das dieses Kapitel
+          # verhindern soll. In dieser Schleife wird deshalb NICHTS geschrieben.
+          MODI=""
+          PLAN=""
           TMP=$(mktemp -d)
           while IFS='|' read -r QUELLE ZIEL; do
             QUELLE="$(printf '%s' "$QUELLE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
@@ -465,19 +473,33 @@ jobs:
             VERTEILUNG_MODE=""; VERTEILUNG_REASON=""
             verteilung_decide "$GITHUB_WORKSPACE/$QUELLE" "$FERN_DATEI"
             echo "::notice::$REPO $ZIEL: mode=$VERTEILUNG_MODE -- $VERTEILUNG_REASON"
-            case "$VERTEILUNG_MODE" in
-              skip) ;;
-              abweichler)
-                # §0.5 Abweichler-Ausweis: sichtbar machen, nie ueberschreiben.
-                echo "::warning::$REPO $ZIEL weicht ab und traegt keinen Verteil-Marker — nicht angefasst ($VERTEILUNG_REASON)"
-                ;;
-              create|update)
-                ZU_TUN="$ZU_TUN$QUELLE|$ZIEL|$FERN_SHA"$'\n'
-                ;;
-            esac
+            if [ "$VERTEILUNG_MODE" = "abweichler" ]; then
+              # §0.5 Abweichler-Ausweis: sichtbar machen, nie ueberschreiben.
+              echo "::warning::$REPO $ZIEL weicht ab und traegt keinen Verteil-Marker — nicht angefasst ($VERTEILUNG_REASON)"
+            fi
+            MODI="$MODI $VERTEILUNG_MODE"
+            PLAN="$PLAN$QUELLE|$ZIEL|$VERTEILUNG_MODE"$'\n'
           done <<< "$PAARE"
 
-          [ -n "$ZU_TUN" ] || { echo "::notice::$REPO: nichts zu verteilen"; exit 0; }
+          VERTEILUNG_PAAR_MODE=""; VERTEILUNG_PAAR_REASON=""
+          # shellcheck disable=SC2086  # MODI ist eine Wortliste, die Trennung ist gewollt.
+          verteilung_paar_modus $MODI
+          echo "::notice::$REPO Paar-Entscheidung: $VERTEILUNG_PAAR_MODE -- $VERTEILUNG_PAAR_REASON"
+          case "$VERTEILUNG_PAAR_MODE" in
+            abweichler)
+              echo "::warning::$REPO: das Box-Tor-Paar bleibt VOLLSTAENDIG unangetastet ($VERTEILUNG_PAAR_REASON) — ein halbes Paar waere ein totes Pflichttor"
+              exit 0
+              ;;
+            skip)
+              echo "::notice::$REPO: nichts zu verteilen"
+              exit 0
+              ;;
+          esac
+          # Ab hier geht das GANZE Paar in EINEN Branch und EINEN PR — auch die
+          # Haelfte, die fuer sich genommen `skip` waere. Byte-gleiche Dateien
+          # werden beim Schreiben uebersprungen, das spart den leeren Commit,
+          # aendert aber nichts an der Entscheidung: sie fiel fuer das Paar.
+          ZU_TUN="$PLAN"
           if [ "${DRY_RUN:-false}" = "true" ]; then
             echo "DRY-RUN: wuerde in $REPO verteilen:"; printf '%s' "$ZU_TUN"; exit 0
           fi
@@ -487,13 +509,20 @@ jobs:
             -f "ref=refs/heads/${BRANCH}" -f "sha=${BASIS}" > /dev/null 2>&1 \
             || echo "::notice::branch ${BRANCH} existiert bereits in $REPO"
 
-          while IFS='|' read -r QUELLE ZIEL _; do
+          while IFS='|' read -r QUELLE ZIEL MODUS; do
             [ -n "$QUELLE" ] || continue
             INHALT_B64=$(base64 < "$GITHUB_WORKSPACE/$QUELLE" | tr -d '\n')
             # SHA IMMER vom Branch holen, nie vom Default-Branch: bei einem
             # Re-Lauf liegt die Datei dort schon, und ein fremder sha waere 409.
             ZWEIG_JSON=$(gh api "/repos/${REPO}/contents/${ZIEL}?ref=${BRANCH}" 2>/dev/null || echo '{}')
             ZWEIG_SHA=$(printf '%s' "$ZWEIG_JSON" | jq -r '.sha // empty')
+            # Die `skip`-Haelfte steht im Paar-Plan, damit die Entscheidung
+            # ueber das Paar fiel — auf dem Branch liegt sie aber schon richtig.
+            # Ein PUT mit gleichem Inhalt waere ein leerer Commit, kein Fortschritt.
+            if [ "$MODUS" = "skip" ] && [ -n "$ZWEIG_SHA" ]; then
+              echo "::notice::$REPO $ZIEL steht schon richtig im Zweig — nichts zu schreiben"
+              continue
+            fi
             NUTZLAST=$(jq -nc --arg msg "chore(tore): Box-Tor verteilen — ${ZIEL}" \
               --arg ct "$INHALT_B64" --arg br "$BRANCH" --arg sh "$ZWEIG_SHA" \
               'if $sh == "" then {message:$msg, content:$ct, branch:$br}

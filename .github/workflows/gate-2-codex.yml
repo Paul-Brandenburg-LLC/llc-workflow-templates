@@ -878,14 +878,51 @@ jobs:
           echo "state=$STATE" >> "$GITHUB_OUTPUT"
           echo "desc=$DESC" >> "$GITHUB_OUTPUT"
 
+      # ⛔ `pending` darf ein fertiges Urteil an diesem SHA NICHT ersetzen.
+      #
+      # Gemessener Kreis: die Bruecke weicht aus und setzt `gate-2-codex` auf
+      # `success`; ihr eigener PR-Kommentar loest `issue_comment` aus; dieser
+      # Workflow laeuft an, findet Codex weiterhin schweigend, rechnet
+      # `pending` — und schrieb das bedingungslos ueber das `success`. Die
+      # Ausweichung machte sich selbst kaputt. Die Bruecke setzt den Status
+      # seither VOR dem Kommentar; das hier ist die zweite Lage, unabhaengig
+      # davon, wer den Lauf ausloest.
+      #
+      # Ein echtes Codex-Urteil und ein Ausweich-Urteil DIESES Laufes sind nie
+      # `pending` und schreiben immer. Nur der Zustand „noch nichts entschieden"
+      # haelt sich zurueck.
+      #
+      # ⚠ Je Context geprueft, nicht einmal pauschal: der Schritt bedient zwei
+      # (`gate-2-codex` und `bridge`), und die koennen auseinanderstehen — etwa
+      # wenn ein frueherer Lauf nur einen von beiden geschrieben hat.
       - name: Post Status
         if: steps.head.outputs.bot_exempt != 'true' && steps.scope.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ steps.head.outputs.sha }}
+          STATE: ${{ steps.urteil.outputs.state }}
+          DESC: ${{ steps.urteil.outputs.desc }}
         run: |
+          set -uo pipefail
+          BESTAND='[]'
+          if [ "$STATE" = "pending" ]; then
+            BESTAND="$(gh api "/repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/status" \
+              --jq '[.statuses[] | {context: .context, state: .state}]' 2>/dev/null || echo '[]')"
+            [ -n "$BESTAND" ] || BESTAND='[]'
+          fi
           for ctx in gate-2-codex bridge; do
-            gh api -X POST "/repos/$GITHUB_REPOSITORY/statuses/${{ steps.head.outputs.sha }}" \
-              -f state="${{ steps.urteil.outputs.state }}" \
+            if [ "$STATE" = "pending" ]; then
+              VORHANDEN="$(printf '%s' "$BESTAND" \
+                | jq -r --arg c "$ctx" 'map(select(.context == $c)) | .[0].state // ""' 2>/dev/null || echo "")"
+              case "$VORHANDEN" in
+                success|failure|error)
+                  echo "::notice::$ctx steht an $HEAD_SHA schon auf $VORHANDEN — pending wertet nicht ab"
+                  continue
+                  ;;
+              esac
+            fi
+            gh api -X POST "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+              -f state="$STATE" \
               -f context="$ctx" \
-              -f description="${{ steps.urteil.outputs.desc }}"
+              -f description="$DESC"
           done

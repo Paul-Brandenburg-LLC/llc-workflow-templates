@@ -346,6 +346,104 @@ else
   printf 'FAIL G Bruecke oder python3 fehlt — Stoerungsfall nicht messbar\n'; FEHLER=$((FEHLER + 1))
 fi
 
+# --- H: `Post Status` darf ein fertiges Urteil nicht auf pending abwerten ----
+#
+# ⛔ Der gemessene Kreis: die Bruecke weicht aus und setzt `gate-2-codex` auf
+# `success`; ihr eigener PR-Kommentar loest `issue_comment` aus; dieser
+# Workflow laeuft an, findet Codex weiterhin schweigend, rechnet `pending` —
+# und schrieb das bedingungslos ueber das `success`. Die Ausweichung machte
+# sich selbst kaputt.
+#
+# Gemessen wird der GANZE `Post Status`-Block aus der Workflow-Datei gegen eine
+# `gh`-Attrappe; keine zweite Kopie, kein Netz. `ausweich_urteil()` allein
+# koennte das nicht zeigen — der Fehler sass hinter ihr.
+POST_BLOCK="$(awk '
+  /^      - name: Post Status/ { s=1 }
+  s && /^        run: \|$/ { r=1; next }
+  r && /^      [^ ]/ { exit }
+  r { print }
+' "$WF")"
+if [ -z "$POST_BLOCK" ] || ! command -v jq >/dev/null 2>&1; then
+  printf 'FAIL H Post-Status-Block nicht extrahierbar oder jq fehlt\n'; FEHLER=$((FEHLER + 1))
+else
+  H_TMP="$(mktemp -d)"
+  printf '%s\n' "$POST_BLOCK" | sed 's/^          //' > "$H_TMP/post.sh"
+  mkdir -p "$H_TMP/bin" "$H_TMP/fix"
+  cat > "$H_TMP/bin/gh" <<'ATTRAPPE'
+#!/usr/bin/env bash
+# Attrappe: GET /commits/<sha>/status aus $FIXTUR/bestand.json, POST wird nur
+# protokolliert. Jeder POST landet als eine Zeile "<context>|<state>" in
+# $POSTLOG — daran misst die Probe, WAS ueberhaupt geschrieben wurde.
+set -uo pipefail
+methode="GET"; filter=""; ctx=""; state=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    api) shift ;;
+    -X) methode="${2:-}"; shift 2 ;;
+    --jq) filter="${2:-}"; shift 2 ;;
+    -f) case "${2:-}" in
+          context=*) ctx="${2#context=}" ;;
+          state=*) state="${2#state=}" ;;
+        esac
+        shift 2 ;;
+    -*) shift ;;
+    *) shift ;;
+  esac
+done
+if [ "$methode" = "POST" ]; then
+  printf '%s|%s\n' "$ctx" "$state" >> "$POSTLOG"
+  exit 0
+fi
+datei="$FIXTUR/bestand.json"
+[ -f "$datei" ] || exit 1
+if [ -n "$filter" ]; then jq -c -r "$filter" < "$datei"; else cat "$datei"; fi
+ATTRAPPE
+  chmod +x "$H_TMP/bin/gh"
+  h_bestand() { # <json-array der statuses>
+    printf '{"state":"pending","statuses":%s}\n' "$1" > "$H_TMP/fix/bestand.json"
+  }
+  h_lauf() { # state -> "ctx|state,ctx|state" in Reihenfolge der POSTs
+    : > "$H_TMP/postlog"
+    ( PATH="$H_TMP/bin:$PATH" FIXTUR="$H_TMP/fix" POSTLOG="$H_TMP/postlog" \
+      GITHUB_REPOSITORY="org/repo" HEAD_SHA="$(printf 'a%.0s' $(seq 40))" \
+      STATE="$1" DESC="Text" bash "$H_TMP/post.sh" >/dev/null 2>&1 )
+    paste -sd, - < "$H_TMP/postlog" | sed 's/,$//'
+  }
+  FERTIG='[{"context":"gate-2-codex","state":"success"},{"context":"bridge","state":"success"}]'
+
+  h_bestand "$FERTIG"
+  pruefe "H1 pending gegen ein fertiges success -> gar kein Schreiben" \
+    '' "$(h_lauf pending)"
+
+  # Gegenprobe, damit H1 nicht aus Versehen gruen ist: ohne Bestand schreibt
+  # derselbe Lauf sehr wohl beide Kontexte.
+  h_bestand '[]'
+  pruefe "H2 pending ohne Bestand -> beide Kontexte (H1 misst wirklich)" \
+    'gate-2-codex|pending,bridge|pending' "$(h_lauf pending)"
+
+  # ⚠ Der Schritt schreibt ZWEI Kontexte in einer Schleife. Sie koennen
+  # auseinanderstehen — geprueft wird deshalb je Kontext, nicht einmal pauschal.
+  h_bestand '[{"context":"gate-2-codex","state":"success"},{"context":"bridge","state":"pending"}]'
+  pruefe "H3 nur ein Kontext fertig -> nur der andere wird geschrieben" \
+    'bridge|pending' "$(h_lauf pending)"
+
+  h_bestand '[{"context":"gate-2-codex","state":"failure"},{"context":"bridge","state":"failure"}]'
+  pruefe "H4 pending gegen ein fertiges failure -> gar kein Schreiben" \
+    '' "$(h_lauf pending)"
+
+  # ⛔ Die Gegenrichtung: ein echtes Codex-Urteil oder das Ausweich-Urteil
+  # DIESES Laufes ist nie `pending` und schreibt IMMER. Wer hier auch bremste,
+  # haette die Ausweichung abgeschafft statt sie geschuetzt.
+  h_bestand "$FERTIG"
+  pruefe "H5 ein Urteil dieses Laufes schreibt auch ueber Bestand" \
+    'gate-2-codex|success,bridge|success' "$(h_lauf success)"
+  h_bestand "$FERTIG"
+  pruefe "H6 auch ein failure dieses Laufes schreibt" \
+    'gate-2-codex|failure,bridge|failure' "$(h_lauf failure)"
+
+  rm -rf "$H_TMP"
+fi
+
 echo "---"
 if [ "$FEHLER" -eq 0 ]; then
   echo "codex-ausweichung: alle Faelle gruen"
