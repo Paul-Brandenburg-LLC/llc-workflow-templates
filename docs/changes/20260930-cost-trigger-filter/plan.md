@@ -33,3 +33,14 @@ Der bestehende review.yml-Lauf nutzte von der gepinnten Action nicht
 unterstützte Eingaben und wurde ohne Review grün. Auf die im Trading-Repo
 bereits funktionierenden OAuth-/Prompt-Eingaben umgestellt; ein fehlender
 Ausführungsnachweis lässt den Job jetzt scheitern. Der Modelltyp bleibt gleich.
+
+## Günstigerer Rechner für die Statusberechnung
+
+Der unveränderte Gate-2-Code benötigt nur Bash, GitHub CLI, jq und Coreutils.
+Diese sind laut offizieller Image-Liste auf `ubuntu-slim` vorhanden. Der
+Job behält seine Fünf-Minuten-Grenze (Slim erlaubt maximal 15 Minuten).
+GitHub nennt 0,002 USD/Minute statt 0,006 USD/Minute für den bisherigen
+Linux-Rechner. Vor Release muss der echte Gate-2-Lauf auf Slim bestehen.
+
+Quellen: https://docs.github.com/de/billing/reference/actions-runner-pricing
+und https://github.com/actions/runner-images/blob/main/images/ubuntu-slim/ubuntu-slim-Readme.md

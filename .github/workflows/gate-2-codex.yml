@@ -84,7 +84,8 @@ jobs:
       (github.event_name == 'pull_request') ||
       (github.event_name == 'pull_request_review') ||
       (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && github.event.issue.state == 'open' && (github.event.comment.user.type != 'Bot' || github.event.comment.user.login == 'chatgpt-codex-connector[bot]' || contains(github.event.comment.body, '/gate-2 recheck')))
-    runs-on: ubuntu-latest
+    # API/status work only; no build, Docker or privileged operations.
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     steps:
       - name: Resolve PR HEAD
