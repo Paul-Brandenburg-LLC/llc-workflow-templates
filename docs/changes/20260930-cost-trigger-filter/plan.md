@@ -44,3 +44,10 @@ Linux-Rechner. Vor Release muss der echte Gate-2-Lauf auf Slim bestehen.
 
 Quellen: https://docs.github.com/de/billing/reference/actions-runner-pricing
 und https://github.com/actions/runner-images/blob/main/images/ubuntu-slim/ubuntu-slim-Readme.md
+
+## Abgeschaltete Automatisierungen bleiben abgeschaltet
+
+Der bestehende Verteilungsweg überspringt ausdrücklich alle Gate-2-Workflows,
+deren GitHub-Laufzeitstatus nicht `active` ist. Das verhindert insbesondere,
+dass die absichtlich inerte Ops-Datei als altes Template wiederhergestellt
+wird. Fehler beim Statusabruf brechen den betreffenden Verteilungsschritt ab.

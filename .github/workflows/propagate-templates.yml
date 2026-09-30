@@ -271,6 +271,17 @@ jobs:
             exit 0
           fi
 
+          # Retired Gate-2 workflows must never be recreated by a cost rollout.
+          # Check runtime state as well as the file: an intentionally inert file
+          # is otherwise classified as a legacy workflow to migrate.
+          if [ "$TEMPLATE" = "gate-2-codex.yml" ]; then
+            WORKFLOW_STATE=$(gh api "/repos/${REPO}/actions/workflows/gate-2-codex.yml" --jq '.state')
+            if [ "$WORKFLOW_STATE" != "active" ]; then
+              echo "::notice::$REPO: Gate 2 is $WORKFLOW_STATE; preserve retirement, no update"
+              exit 0
+            fi
+          fi
+
           # 4a. Migrate-Wrapper (base-indent Heredoc, nur bei mode=migrate genutzt).
           MIGRATE_WRAPPER=$(cat <<EOF
           name: Gate 2 Codex
