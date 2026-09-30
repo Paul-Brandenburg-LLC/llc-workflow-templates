@@ -266,11 +266,6 @@ jobs:
           echo "::notice::$REPO $TEMPLATE: mode=$DECISION_MODE (pinned=${PINNED_REF:-<static>} target=$TAG) -- $DECISION_REASON"
 
           [ "$DECISION_MODE" = "skip" ] && exit 0
-          if [ "${DRY_RUN:-false}" = "true" ]; then
-            echo "DRY-RUN: wuerde '$DECISION_MODE' fuer $REPO/$TARGET ausfuehren (${PINNED_REF:-<static>} -> $TAG) -- kein Branch/PR"
-            exit 0
-          fi
-
           # Retired Gate-2 workflows must never be recreated by a cost rollout.
           # Check runtime state as well as the file: an intentionally inert file
           # is otherwise classified as a legacy workflow to migrate.
@@ -280,6 +275,11 @@ jobs:
               echo "::notice::$REPO: Gate 2 is $WORKFLOW_STATE; preserve retirement, no update"
               exit 0
             fi
+          fi
+
+          if [ "${DRY_RUN:-false}" = "true" ]; then
+            echo "DRY-RUN: wuerde '$DECISION_MODE' fuer $REPO/$TARGET ausfuehren (${PINNED_REF:-<static>} -> $TAG) -- kein Branch/PR"
+            exit 0
           fi
 
           # 4a. Migrate-Wrapper (base-indent Heredoc, nur bei mode=migrate genutzt).
