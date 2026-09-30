@@ -47,7 +47,14 @@ und https://github.com/actions/runner-images/blob/main/images/ubuntu-slim/ubuntu
 
 ## Abgeschaltete Automatisierungen bleiben abgeschaltet
 
-Der bestehende Verteilungsweg überspringt ausdrücklich alle Gate-2-Workflows,
-deren GitHub-Laufzeitstatus nicht `active` ist. Das verhindert insbesondere,
-dass die absichtlich inerte Ops-Datei als altes Template wiederhergestellt
-wird. Fehler beim Statusabruf brechen den betreffenden Verteilungsschritt ab.
+Die versionierte Datei `.github/retired-gate2-repositories.json` sperrt
+Updates für die vier nachweislich deaktivierten Repositories: Ops, Freihafen,
+LLC-Hub und Standards. Die Liste wurde am 30.09.2026 über die Actions-API
+mit Pauls bestehendem CLI-Zugang geprüft. Bei künftigen Stilllegungen gehört
+die Registry-Aktualisierung zur Stilllegung.
+
+Der Dry-Run zeigte, dass die Rollout-App keine Actions-Leserechte besitzt.
+Ihre Rechte werden nicht erweitert; sie verwendet die geprüfte, versionierte
+Stilllegungsliste. Ein ungültiges/fehlendes Register bricht die Verteilung ab.
+Damit wird insbesondere die absichtlich inerte Ops-Datei nicht als altes
+Template wiederhergestellt.

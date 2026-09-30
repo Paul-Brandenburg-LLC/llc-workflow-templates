@@ -266,13 +266,13 @@ jobs:
           echo "::notice::$REPO $TEMPLATE: mode=$DECISION_MODE (pinned=${PINNED_REF:-<static>} target=$TAG) -- $DECISION_REASON"
 
           [ "$DECISION_MODE" = "skip" ] && exit 0
-          # Retired Gate-2 workflows must never be recreated by a cost rollout.
-          # Check runtime state as well as the file: an intentionally inert file
-          # is otherwise classified as a legacy workflow to migrate.
+          # Explicit retirement registry: never recreate intentionally retired
+          # automation. The rollout App has no Actions-read permission; keep its
+          # privileges unchanged and audit this registry from the operator CLI.
           if [ "$TEMPLATE" = "gate-2-codex.yml" ]; then
-            WORKFLOW_STATE=$(gh api "/repos/${REPO}/actions/workflows/gate-2-codex.yml" --jq '.state')
-            if [ "$WORKFLOW_STATE" != "active" ]; then
-              echo "::notice::$REPO: Gate 2 is $WORKFLOW_STATE; preserve retirement, no update"
+            RETIRED=$(jq -r --arg repo "${REPO#*/}" 'index($repo) != null' .github/retired-gate2-repositories.json)
+            if [ "$RETIRED" = "true" ]; then
+              echo "::notice::$REPO: Gate 2 retired; no update"
               exit 0
             fi
           fi
