@@ -26,3 +26,10 @@ Consumer auf bisherige Pins zurücksetzen; kein Tag wird umgeschrieben.
 Probe: fremde Bot-Fortschrittsmeldung startet keinen Runner, menschlicher
 und expliziter Bot-Recheck bleiben möglich. Keine Änderungen an Deploy-
 oder Produktivdiensten.
+
+## Review-Ausführung absichern
+
+Der bestehende review.yml-Lauf nutzte von der gepinnten Action nicht
+unterstützte Eingaben und wurde ohne Review grün. Auf die im Trading-Repo
+bereits funktionierenden OAuth-/Prompt-Eingaben umgestellt; ein fehlender
+Ausführungsnachweis lässt den Job jetzt scheitern. Der Modelltyp bleibt gleich.
