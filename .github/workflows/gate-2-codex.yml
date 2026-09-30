@@ -75,12 +75,17 @@ jobs:
     # Der PR-Waechter (`issue.pull_request != null`) bleibt: auf reinen Issues
     # hat die Bruecke nichts zu suchen. `state == 'open'` haelt Kommentare an
     # geschlossenen PRs draussen — dort ist nichts mehr zu entscheiden.
-    # Beweis: scripts/gate-2-verdict-selftest.sh (Faelle S3-S5).
+    # Menschen koennen weiterhin mit jedem Kommentar neu berechnen lassen.
+    # Automatische Fortschrittsmeldungen anderer Bots aendern kein Codex-Urteil
+    # und starten keinen Runner. Bot-gesteuerte Resolver nutzen /gate-2 recheck;
+    # Codex-Kommentare bleiben immer ein Eingang, auch bei editierten Summaries.
+    # Beweis: scripts/gate-2-verdict-selftest.sh und gate-2-trigger-selftest.py.
     if: >-
       (github.event_name == 'pull_request') ||
       (github.event_name == 'pull_request_review') ||
-      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && github.event.issue.state == 'open')
-    runs-on: ubuntu-latest
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && github.event.issue.state == 'open' && (github.event.comment.user.type != 'Bot' || github.event.comment.user.login == 'chatgpt-codex-connector[bot]' || contains(github.event.comment.body, '/gate-2 recheck')))
+    # API/status work only; no build, Docker or privileged operations.
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     steps:
       - name: Resolve PR HEAD
@@ -688,7 +693,7 @@ jobs:
             # Der Text ist der einzige Ort, an dem der Weg heraus steht: das
             # Aufloesen allein loest keinen Lauf aus (P1 Runde 9, s. Job-`if`).
             STATE=failure
-            DESC="$CODEX_OFFEN offene Codex-Befunde — aufloesen, dann PR-Kommentar (rechnet neu)"
+            DESC="$CODEX_OFFEN offene Codex-Befunde — aufloesen, dann /gate-2 recheck kommentieren"
           else
             if [ -n "$REVIEW_SHA" ] && [ "$REVIEW_SHA" = "$HEAD_SHA" ]; then
               # (1) Formales Review gegen den aktuellen HEAD — verbindlich.
