@@ -443,7 +443,8 @@ esac
 
 # Das Praedikat, das S3 misst und S4 gegenprueft.
 bindet_kommentar_an_den_bot() {
-  printf '%s' "$1" | grep -q 'github\.event\.comment\.user\.login'
+  printf '%s' "$1" | grep -q 'github\.event\.comment\.user\.login' &&
+    ! printf '%s' "$1" | grep -q "github\.event\.comment\.user\.type != 'Bot'"
 }
 
 # Die alte Fassung woertlich (origin/main, vor diesem Fix) - nur fuer S4.
@@ -626,3 +627,6 @@ fi
 
 echo "=== $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ] || exit 1
+
+# Exercise the actual job expression with human, Codex and unrelated bot events.
+python3 scripts/gate-2-trigger-selftest.py "$WF"
