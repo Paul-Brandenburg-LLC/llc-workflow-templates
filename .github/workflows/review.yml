@@ -3,7 +3,6 @@ on: pull_request
 permissions:
   contents: read
   pull-requests: write
-  id-token: write
 concurrency:
   group: review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
@@ -19,6 +18,8 @@ jobs:
         uses: anthropics/claude-code-action@12310e4417c3473095c957cb311b3cf59a38d659  # v1.0.99
         with:
           allowed_bots: '*'
+          # Use the explicitly scoped workflow token; no OIDC app exchange.
+          github_token: ${{ github.token }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           track_progress: true
           claude_args: "--model claude-sonnet-4-6"
