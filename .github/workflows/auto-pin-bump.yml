@@ -45,17 +45,27 @@ jobs:
           set -euo pipefail
           entry='mozilla/emSign_ECC_Root_CA_-_G3.crt'
           conf='/etc/ca-certificates.conf'
-          test -f "$conf"
+          test -f "$conf" || { echo '::error::Ubuntu CA configuration missing'; exit 1; }
           if grep -Fqx "$entry" "$conf"; then
             if [ "$(id -u)" -eq 0 ]; then
-              sed -i "s#^${entry}\$#!${entry}#" "$conf"
+              sed -i 's#^mozilla/emSign_ECC_Root_CA_-_G3\.crt$#!mozilla/emSign_ECC_Root_CA_-_G3.crt#' "$conf"
               update-ca-certificates --fresh
             else
-              sudo sed -i "s#^${entry}\$#!${entry}#" "$conf"
+              sudo sed -i 's#^mozilla/emSign_ECC_Root_CA_-_G3\.crt$#!mozilla/emSign_ECC_Root_CA_-_G3.crt#' "$conf"
               sudo update-ca-certificates --fresh
             fi
           fi
-          ! grep -Fqx "$entry" "$conf"
+          if grep -Fqx "$entry" "$conf"; then
+            echo "::error::Affected eMudhra CA remains enabled"
+            exit 1
+          fi
+          {
+            printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt'
+            printf '%s\n' 'REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt'
+            printf '%s\n' 'CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt'
+            printf '%s\n' 'GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt'
+            printf 'NODE_OPTIONS=%s\n' "${NODE_OPTIONS:+$NODE_OPTIONS }--use-openssl-ca"
+          } >> "$GITHUB_ENV"
       - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         id: app-token
         with:
