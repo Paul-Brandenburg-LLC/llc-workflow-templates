@@ -62,6 +62,12 @@ permissions:
 jobs:
   detect:
     runs-on: ubuntu-latest
+    env:
+      NODE_OPTIONS: --use-openssl-ca
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+      REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+      CURL_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+      GIT_SSL_CAINFO: /etc/ssl/certs/ca-certificates.crt
     outputs:
       tag: ${{ steps.read.outputs.tag }}
       template: ${{ steps.read.outputs.template }}
@@ -86,13 +92,6 @@ jobs:
             echo "::error::Affected eMudhra CA remains enabled"
             exit 1
           fi
-          {
-            printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt'
-            printf '%s\n' 'REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt'
-            printf '%s\n' 'CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt'
-            printf '%s\n' 'GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt'
-            printf 'NODE_OPTIONS=%s\n' "${NODE_OPTIONS:+$NODE_OPTIONS }--use-openssl-ca"
-          } >> "$GITHUB_ENV"
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with: { fetch-depth: 0 }
       - name: Determine tag + template
@@ -112,6 +111,12 @@ jobs:
   discover:
     needs: detect
     runs-on: ubuntu-latest
+    env:
+      NODE_OPTIONS: --use-openssl-ca
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+      REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+      CURL_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+      GIT_SSL_CAINFO: /etc/ssl/certs/ca-certificates.crt
     outputs:
       repos: ${{ steps.list.outputs.repos }}
     steps:
@@ -135,13 +140,6 @@ jobs:
             echo "::error::Affected eMudhra CA remains enabled"
             exit 1
           fi
-          {
-            printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt'
-            printf '%s\n' 'REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt'
-            printf '%s\n' 'CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt'
-            printf '%s\n' 'GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt'
-            printf 'NODE_OPTIONS=%s\n' "${NODE_OPTIONS:+$NODE_OPTIONS }--use-openssl-ca"
-          } >> "$GITHUB_ENV"
       - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2
         id: org-token
         with:
@@ -187,6 +185,12 @@ jobs:
   propagate:
     needs: [detect, discover]
     runs-on: ubuntu-latest
+    env:
+      NODE_OPTIONS: --use-openssl-ca
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+      REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+      CURL_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+      GIT_SSL_CAINFO: /etc/ssl/certs/ca-certificates.crt
     strategy:
       fail-fast: false
       max-parallel: 5
@@ -213,13 +217,6 @@ jobs:
             echo "::error::Affected eMudhra CA remains enabled"
             exit 1
           fi
-          {
-            printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt'
-            printf '%s\n' 'REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt'
-            printf '%s\n' 'CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt'
-            printf '%s\n' 'GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt'
-            printf 'NODE_OPTIONS=%s\n' "${NODE_OPTIONS:+$NODE_OPTIONS }--use-openssl-ca"
-          } >> "$GITHUB_ENV"
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.2.2 — für scripts/pin-bump-decide.sh
       - uses: actions/create-github-app-token@v2
         id: app-token
@@ -462,6 +459,12 @@ jobs:
   summary:
     needs: propagate
     runs-on: ubuntu-latest
+    env:
+      NODE_OPTIONS: --use-openssl-ca
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+      REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+      CURL_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+      GIT_SSL_CAINFO: /etc/ssl/certs/ca-certificates.crt
     if: always()
     permissions:
       actions: read
@@ -486,13 +489,6 @@ jobs:
             echo "::error::Affected eMudhra CA remains enabled"
             exit 1
           fi
-          {
-            printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt'
-            printf '%s\n' 'REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt'
-            printf '%s\n' 'CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt'
-            printf '%s\n' 'GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt'
-            printf 'NODE_OPTIONS=%s\n' "${NODE_OPTIONS:+$NODE_OPTIONS }--use-openssl-ca"
-          } >> "$GITHUB_ENV"
       - name: Aggregate matrix-job results
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

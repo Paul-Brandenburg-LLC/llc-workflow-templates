@@ -86,6 +86,12 @@ jobs:
       (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && github.event.issue.state == 'open' && (github.event.comment.user.type != 'Bot' || github.event.comment.user.login == 'chatgpt-codex-connector[bot]' || contains(github.event.comment.body, '/gate-2 recheck')))
     # API/status work only; no build, Docker or privileged operations.
     runs-on: ubuntu-slim
+    env:
+      NODE_OPTIONS: --use-openssl-ca
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+      REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+      CURL_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+      GIT_SSL_CAINFO: /etc/ssl/certs/ca-certificates.crt
     timeout-minutes: 5
     steps:
       - name: Disable affected eMudhra CA for this job
@@ -108,13 +114,6 @@ jobs:
             echo "::error::Affected eMudhra CA remains enabled"
             exit 1
           fi
-          {
-            printf '%s\n' 'SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt'
-            printf '%s\n' 'REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt'
-            printf '%s\n' 'CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt'
-            printf '%s\n' 'GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt'
-            printf 'NODE_OPTIONS=%s\n' "${NODE_OPTIONS:+$NODE_OPTIONS }--use-openssl-ca"
-          } >> "$GITHUB_ENV"
       - name: Resolve PR HEAD
         id: head
         env:
