@@ -39,6 +39,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Disable affected eMudhra CA for this job
+        shell: bash
+        run: |
+          set -euo pipefail
+          entry='mozilla/emSign_ECC_Root_CA_-_G3.crt'
+          conf='/etc/ca-certificates.conf'
+          test -f "$conf"
+          if grep -Fqx "$entry" "$conf"; then
+            if [ "$(id -u)" -eq 0 ]; then
+              sed -i "s#^${entry}\$#!${entry}#" "$conf"
+              update-ca-certificates --fresh
+            else
+              sudo sed -i "s#^${entry}\$#!${entry}#" "$conf"
+              sudo update-ca-certificates --fresh
+            fi
+          fi
+          ! grep -Fqx "$entry" "$conf"
       - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         id: app-token
         with:
