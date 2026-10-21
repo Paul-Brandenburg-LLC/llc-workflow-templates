@@ -86,8 +86,34 @@ jobs:
       (github.event_name == 'issue_comment' && github.event.issue.pull_request != null && github.event.issue.state == 'open' && (github.event.comment.user.type != 'Bot' || github.event.comment.user.login == 'chatgpt-codex-connector[bot]' || contains(github.event.comment.body, '/gate-2 recheck')))
     # API/status work only; no build, Docker or privileged operations.
     runs-on: ubuntu-slim
+    env:
+      NODE_OPTIONS: --use-openssl-ca
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+      REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+      CURL_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+      GIT_SSL_CAINFO: /etc/ssl/certs/ca-certificates.crt
     timeout-minutes: 5
     steps:
+      - name: Disable affected eMudhra CA for this job
+        shell: bash
+        run: |
+          set -euo pipefail
+          entry='mozilla/emSign_ECC_Root_CA_-_G3.crt'
+          conf='/etc/ca-certificates.conf'
+          test -f "$conf" || { echo '::error::Ubuntu CA configuration missing'; exit 1; }
+          if grep -Fqx "$entry" "$conf"; then
+            if [ "$(id -u)" -eq 0 ]; then
+              sed -i 's#^mozilla/emSign_ECC_Root_CA_-_G3\.crt$#!mozilla/emSign_ECC_Root_CA_-_G3.crt#' "$conf"
+              update-ca-certificates --fresh
+            else
+              sudo sed -i 's#^mozilla/emSign_ECC_Root_CA_-_G3\.crt$#!mozilla/emSign_ECC_Root_CA_-_G3.crt#' "$conf"
+              sudo update-ca-certificates --fresh
+            fi
+          fi
+          if grep -Fqx "$entry" "$conf"; then
+            echo "::error::Affected eMudhra CA remains enabled"
+            exit 1
+          fi
       - name: Resolve PR HEAD
         id: head
         env:
